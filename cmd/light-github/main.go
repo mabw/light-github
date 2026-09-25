@@ -214,7 +214,8 @@ func main() {
 		Config:     cfg,
 		ConfigPath: cfgPath,
 		OnConfigChange: func(c config.Config) {
-			cfg = c // logLevel/refresh/autoSysProxy 热应用；addr/token 由 UI 提示重启
+			// 配置内存态由 webapi.Deps.UpdateConfig 维护（单一来源，review C2）；
+			// 此处只做热应用：logLevel/refresh/autoSysProxy；addr/token 由 UI 提示重启
 			logs.SetLevel(parseLevel(c.LogLevel))
 			refreshEvery.Store(int64(c.Refresh))
 			// AutoSysProxy 开启即接入；关闭仅影响下次启动（断开走显式操作，不反向改系统）
@@ -258,8 +259,9 @@ func main() {
 		"token", tokenState(cfg.Token), "level", cfg.LogLevel)
 
 	// AutoSysProxy 持久开关：启动即恢复 PAC 接入（默认 off 不动系统设置；
-	// 退出时统一还原，故每次启动重接一次是预期行为）
-	if cfg.AutoSysProxy && !sysproxy.Enabled(pacURL) {
+	// 退出时统一还原，故每次启动重接一次是预期行为）。
+	// 读 deps（配置可能已被并发热变更），不再读启动时的 cfg 局部变量（review C2 竞态）
+	if deps.CurrentConfig().AutoSysProxy && !sysproxy.Enabled(pacURL) {
 		_ = setSysProxy(true)
 	}
 

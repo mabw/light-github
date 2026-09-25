@@ -437,3 +437,27 @@ func TestSysProxyEndpoint(t *testing.T) {
 		t.Fatalf("坏 body 应 400: %d", resp2.StatusCode)
 	}
 }
+
+// 连续两次部分更新互不回滚（review C2：handler 值接收者方法值冻结启动快照，
+// 第二次 POST 以启动时 Config 为基线会静默回滚第一次的修改）
+func TestConfig_SecondPostKeepsFirstChange(t *testing.T) {
+	deps := newDeps(t, config.Config{Addr: "127.0.0.1:12800", Refresh: time.Hour, LogLevel: "info"})
+	deps.ConfigPath = t.TempDir() + "/config.json"
+	srv := httptest.NewServer(Handler(deps))
+	defer srv.Close()
+
+	post := func(body string) {
+		resp, err := http.Post(srv.URL+"/api/config", "application/json", stringReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	post(`{"logLevel":"debug"}`)
+	post(`{"refresh":"30m"}`)
+
+	saved, err := config.Load(deps.ConfigPath)
+	if err != nil || saved.LogLevel != "debug" || saved.Refresh != 30*time.Minute {
+		t.Fatalf("两次更新应同时保留: %+v err=%v", saved, err)
+	}
+}

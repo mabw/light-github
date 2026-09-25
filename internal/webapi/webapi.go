@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/marvin/light-github/internal/config"
@@ -38,6 +39,7 @@ type Deps struct {
 
 	Config     config.Config
 	ConfigPath string
+	mu         sync.Mutex // 保护 Config：POST 写（UpdateConfig）与 GET/热应用读并发（review C2）
 
 	// OnConfigChange 配置热应用（logLevel/refresh）；addr/token 需重启，由 UI 提示
 	OnConfigChange func(config.Config)
@@ -51,6 +53,21 @@ type Deps struct {
 	// 系统代理（PAC 一键接入/还原）；nil 时端点 503
 	SetSysProxy func(on bool) error
 	SysProxyState func() bool
+}
+
+// UpdateConfig 更新内存中的当前配置（cmd 的 OnConfigChange 回调内调用，
+// 保证 handler 看到的 Config 与落盘/热应用一致，而非启动快照）。
+func (d *Deps) UpdateConfig(c config.Config) {
+	d.mu.Lock()
+	d.Config = c
+	d.mu.Unlock()
+}
+
+// CurrentConfig 返回当前配置快照（并发安全）。
+func (d *Deps) CurrentConfig() config.Config {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.Config
 }
 
 // envelope 统一响应信封（全局 API 规范：success/data/error）。
@@ -82,7 +99,7 @@ func Handler(d *Deps) http.Handler {
 
 // auth Token 非空时保护 /api/*（静态页与 PAC 放开：不含敏感数据，
 // 页面 JS 会把 ?token= 透传给 API 请求）。
-func (d Deps) auth(next http.Handler) http.Handler {
+func (d *Deps) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if d.Token != "" && strings.HasPrefix(r.URL.Path, "/api/") {
 			token := r.URL.Query().Get("token")
@@ -102,7 +119,7 @@ func (d Deps) auth(next http.Handler) http.Handler {
 
 // ---- 端点 ----
 
-func (d Deps) handleStatus(w http.ResponseWriter, r *http.Request) {
+func (d *Deps) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, envelope{Error: "method"})
 		return
@@ -133,7 +150,7 @@ func (d Deps) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}})
 }
 
-func (d Deps) handleStats(w http.ResponseWriter, r *http.Request) {
+func (d *Deps) handleStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, envelope{Error: "method"})
 		return
@@ -147,7 +164,7 @@ type logItem struct {
 	logx.Entry
 }
 
-func (d Deps) handleLogs(w http.ResponseWriter, r *http.Request) {
+func (d *Deps) handleLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, envelope{Error: "method"})
 		return
@@ -191,7 +208,7 @@ func (d Deps) handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (d Deps) handleRules(w http.ResponseWriter, r *http.Request) {
+func (d *Deps) handleRules(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, envelope{Error: "method"})
 		return
@@ -206,7 +223,7 @@ func (d Deps) handleRules(w http.ResponseWriter, r *http.Request) {
 	}})
 }
 
-func (d Deps) handleRefresh(w http.ResponseWriter, r *http.Request) {
+func (d *Deps) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, envelope{Error: "method"})
 		return
@@ -225,7 +242,7 @@ func (d Deps) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 // handleAccel 加速开关：POST {"on":bool}。关闭后白名单直通、端口与观测保持，
 // 配置的代理/PAC 不悬空（托盘「关闭加速」同一入口）。
-func (d Deps) handleAccel(w http.ResponseWriter, r *http.Request) {
+func (d *Deps) handleAccel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, envelope{Error: "method"})
 		return
@@ -247,7 +264,7 @@ func (d Deps) handleAccel(w http.ResponseWriter, r *http.Request) {
 
 // handleSysProxy 一键接入/还原系统代理（PAC）。
 // 注意与"接管系统代理"类工具（Clash 系统代理等）互斥——后设置者生效。
-func (d Deps) handleSysProxy(w http.ResponseWriter, r *http.Request) {
+func (d *Deps) handleSysProxy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, envelope{Error: "method"})
 		return
@@ -275,7 +292,7 @@ func (d Deps) handleSysProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleProbe 单域名强制重测（忽略测速缓存；规则页行内测速按钮）。
-func (d Deps) handleProbe(w http.ResponseWriter, r *http.Request) {
+func (d *Deps) handleProbe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, envelope{Error: "method"})
 		return
@@ -304,10 +321,10 @@ func (d Deps) handleProbe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, envelope{Success: true, Data: info})
 }
 
-func (d Deps) handleConfig(w http.ResponseWriter, r *http.Request) {
+func (d *Deps) handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, envelope{Success: true, Data: d.Config})
+		writeJSON(w, http.StatusOK, envelope{Success: true, Data: d.CurrentConfig()})
 	case http.MethodPost:
 		d.postConfig(w, r)
 	default:
@@ -315,8 +332,9 @@ func (d Deps) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// postConfig 部分更新：请求中出现的字段覆盖现值，其余保留；合法即落盘并回调热应用。
-func (d Deps) postConfig(w http.ResponseWriter, r *http.Request) {
+// postConfig 部分更新：请求中出现的字段覆盖现值，其余保留；合法即落盘、
+// 同步内存基线（防下一次 POST 基于启动快照回滚本次修改）并回调热应用。
+func (d *Deps) postConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Addr         *string `json:"addr"`
 		Token        *string `json:"token"`
@@ -329,7 +347,7 @@ func (d Deps) postConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	next := d.Config
+	next := d.CurrentConfig() // 基线取当前值而非启动快照（review C2：否则下次 POST 回滚上次修改）
 	if req.Addr != nil {
 		if _, _, err := net.SplitHostPort(*req.Addr); err != nil {
 			writeJSON(w, http.StatusBadRequest, envelope{Error: "addr 格式应为 host:port"})
@@ -367,15 +385,17 @@ func (d Deps) postConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	prev := d.CurrentConfig()
+	d.UpdateConfig(next) // 内存基线同步，先于回调（回调侧可信任 deps.CurrentConfig）
 	if d.OnConfigChange != nil {
 		d.OnConfigChange(next)
 	}
-	needRestart := next.Addr != d.Config.Addr || next.Token != d.Config.Token
+	needRestart := next.Addr != prev.Addr || next.Token != prev.Token
 	writeJSON(w, http.StatusOK, envelope{Success: true, Data: map[string]any{"needRestart": needRestart}})
 }
 
 // handlePAC 生成 PAC（白名单经代理，其余 DIRECT；接入指引页展示）。
-func (d Deps) handlePAC(w http.ResponseWriter, r *http.Request) {
+func (d *Deps) handlePAC(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, envelope{Error: "method"})
 		return
