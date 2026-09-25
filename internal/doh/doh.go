@@ -12,11 +12,16 @@ import (
 	"time"
 )
 
-// 默认端点：国内可达优先（借鉴 GitHub520 的灾备顺序），可按需覆盖
+// 默认端点：国内可达优先（清单对照 Watt Toolkit 内置 DoH 常量取舍：
+// 两家主力各双 IP + 360 备胎；Google/Cloudflare 国内可达性差不采用）。
+// 全部 IP 直连形态——DoH 端点自身不依赖系统 DNS，防鸡生蛋。
 var defaultEndpoints = []string{
 	"https://223.5.5.5/resolve",    // 阿里
+	"https://223.6.6.6/resolve",    // 阿里（备用 IP）
 	"https://120.53.53.53/resolve", // DNSPod
+	"https://1.12.12.12/resolve",   // DNSPod（备用 IP）
 	"https://doh.pub/resolve",      // DNSPod（域名形态）
+	"https://doh.360.cn/resolve",   // 360
 }
 
 // Client 多端点 DoH 解析器。
