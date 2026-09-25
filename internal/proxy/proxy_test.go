@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -40,10 +41,10 @@ func newStack(t *testing.T, dialer Dialer) (*url.URL, *Server) {
 	t.Helper()
 
 	proxySrv := &Server{
-		Addr:       "127.0.0.1:0",
-		Table:      rule.NewTable([]rule.Rule{{Domain: "accel.test", Kind: rule.KindDynamic}}),
-		Dialer:     dialer,
-		Metrics:    metrics.NewStore(time.Second),
+		Addr:        "127.0.0.1:0",
+		Table:       rule.NewTable([]rule.Rule{{Domain: "accel.test", Kind: rule.KindDynamic}}),
+		Dialer:      dialer,
+		Metrics:     metrics.NewStore(time.Second),
 		DialTimeout: 500 * time.Millisecond,
 	}
 	addr, err := proxySrv.ListenAndServe(context.Background())
@@ -72,12 +73,13 @@ func TestProxy_AcceleratedDomainTunnelsViaPickedIP(t *testing.T) {
 		_, _ = w.Write([]byte("hello-accel"))
 	}))
 	t.Cleanup(upstream.Close)
-	upIP, _, _ := net.SplitHostPort(upstream.Listener.Addr().String())
+	_, upPort, _ := net.SplitHostPort(upstream.Listener.Addr().String())
 
-	dialer := &fakeDialer{ips: []net.IP{net.ParseIP(upIP)}}
+	dialer := &fakeDialer{ips: []net.IP{net.ParseIP("127.0.0.1")}}
 	proxyURL, _ := newStack(t, dialer)
 
-	resp, err := proxiedClient(t, proxyURL).Get("https://accel.test/")
+	// 请求带上游端口：CONNECT accel.test:<port> → 拨 127.0.0.1:<port>
+	resp, err := proxiedClient(t, proxyURL).Get("https://accel.test:" + upPort + "/")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -118,13 +120,12 @@ func TestProxy_FallsBackToNextCandidateOnDialFailure(t *testing.T) {
 		_, _ = w.Write([]byte("ok"))
 	}))
 	t.Cleanup(upstream.Close)
-	upIP, _, _ := net.SplitHostPort(upstream.Listener.Addr().String())
-
-	// 第一个候选为拒连端口（127.0.0.1:443 本测试环境无监听），第二个为可用上游
-	dialer := &fakeDialer{ips: []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP(upIP)}}
+	_, upPort, _ := net.SplitHostPort(upstream.Listener.Addr().String())
+	// 第一候选 240.0.0.1 保留地址必失败，第二候选 127.0.0.1 可用（端口=上游端口）
+	dialer := &fakeDialer{ips: []net.IP{net.ParseIP("240.0.0.1"), net.ParseIP("127.0.0.1")}}
 	proxyURL, _ := newStack(t, dialer)
 
-	resp, err := proxiedClient(t, proxyURL).Get("https://accel.test/")
+	resp, err := proxiedClient(t, proxyURL).Get("https://accel.test:" + upPort + "/")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -142,13 +143,10 @@ func TestProxy_AllCandidatesFailReturns502(t *testing.T) {
 	dialer := &fakeDialer{ips: []net.IP{net.ParseIP("240.0.0.1")}}
 	proxyURL, _ := newStack(t, dialer)
 
-	resp, err := proxiedClient(t, proxyURL).Get("https://accel.test/")
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("全部候选失败应返回 502，得到 %d", resp.StatusCode)
+	// Go http client 收到非 200 的 CONNECT 响应表现为 error（"Bad Gateway"）
+	_, err := proxiedClient(t, proxyURL).Get("https://accel.test/")
+	if err == nil {
+		t.Fatal("全部候选失败应表现为 Bad Gateway 错误")
 	}
 	if len(dialer.failures) != 1 {
 		t.Fatalf("失败应上报: %v", dialer.failures)
@@ -157,19 +155,27 @@ func TestProxy_AllCandidatesFailReturns502(t *testing.T) {
 
 func TestProxy_RecordsMetrics(t *testing.T) {
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Connection", "close") // 促使隧道双向结束（record 异步发生）
 		_, _ = w.Write([]byte("metrics"))
 	}))
 	t.Cleanup(upstream.Close)
-	upIP, _, _ := net.SplitHostPort(upstream.Listener.Addr().String())
-
-	dialer := &fakeDialer{ips: []net.IP{net.ParseIP(upIP)}}
+	_, upPort, _ := net.SplitHostPort(upstream.Listener.Addr().String())
+	dialer := &fakeDialer{ips: []net.IP{net.ParseIP("127.0.0.1")}}
 	proxyURL, srv := newStack(t, dialer)
 
-	if _, err := proxiedClient(t, proxyURL).Get("https://accel.test/"); err != nil {
+	resp, err := proxiedClient(t, proxyURL).Get("https://accel.test:" + upPort + "/")
+	if err != nil {
 		t.Fatal(err)
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close() // 促使隧道双向结束，record 异步发生
 
-	conns := srv.Metrics.Conns(10)
+	var conns []metrics.ConnInfo
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if conns = srv.Metrics.Conns(10); len(conns) > 0 {
+			break
+		}
+	}
 	if len(conns) == 0 {
 		t.Fatal("应记录连接日志")
 	}
