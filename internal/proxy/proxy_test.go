@@ -184,3 +184,33 @@ func TestProxy_RecordsMetrics(t *testing.T) {
 		t.Fatalf("连接日志字段不完整: %+v", c)
 	}
 }
+
+func TestProxy_SetTableHotSwapsRules(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("swapped"))
+	}))
+	t.Cleanup(upstream.Close)
+	_, upPort, _ := net.SplitHostPort(upstream.Listener.Addr().String())
+
+	dialer := &fakeDialer{ips: []net.IP{net.ParseIP("127.0.0.1")}}
+	proxyURL, srv := newStack(t, dialer)
+
+	// 初始规则表含 accel.test → 走选路
+	resp, err := proxiedClient(t, proxyURL).Get("https://accel.test:" + upPort + "/")
+	if err != nil {
+		t.Fatalf("err: %v (picks=%d failures=%v success=%v)", err, dialer.picks, dialer.failures, dialer.success)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if dialer.picks == 0 {
+		t.Fatal("前置条件：初始规则应命中选路")
+	}
+
+	// 热更新为空表 → 同域名转为直通（accel.test 为假域名，直通拨号必失败；
+	// 本用例断言点是"不再触发选路"，直通成败不在关注范围）
+	srv.SetTable(rule.NewTable(nil))
+	_, _ = proxiedClient(t, proxyURL).Get("https://accel.test:" + upPort + "/")
+	if dialer.picks != 1 {
+		t.Fatalf("换表后不应再走选路: picks=%d", dialer.picks)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/marvin/light-github/internal/metrics"
@@ -35,12 +36,31 @@ type Dialer interface {
 // Server CONNECT 隧道代理服务器。并发安全。
 type Server struct {
 	Addr        string
-	Table       *rule.Table
+	Table       *rule.Table // 初始规则表；运行期经 SetTable 热更新
 	Dialer      Dialer
 	Metrics     *metrics.Store
 	DialTimeout time.Duration // 单候选拨号超时；零值默认 5s
 
-	ln net.Listener
+	mu    sync.RWMutex
+	table *rule.Table
+	ln    net.Listener
+}
+
+// SetTable 原子替换规则表（数据源定时刷新用）。
+func (s *Server) SetTable(t *rule.Table) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.table = t
+}
+
+// currentTable 返回当前生效规则表
+func (s *Server) currentTable() *rule.Table {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.table != nil {
+		return s.table
+	}
+	return s.Table
 }
 
 // ListenAndServe 启动监听并在后台 accept，返回实际监听地址。
@@ -98,7 +118,7 @@ func (s *Server) handleConnect(client net.Conn, req *http.Request) {
 		via      string
 		usedIP   net.IP
 	)
-	if _, accelerated := s.Table.Match(domain); accelerated {
+	if _, accelerated := s.currentTable().Match(domain); accelerated {
 		via = "accel"
 		ips, err := s.Dialer.Pick(context.Background(), domain)
 		if err == nil {
