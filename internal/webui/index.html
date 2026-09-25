@@ -200,6 +200,7 @@ details[open] summary::before{transform:rotate(90deg)}
   <div class="toolbar">
     <input id="rules-filter" placeholder="过滤域名…" style="width:180px">
     <button class="btn" id="rules-refresh">刷新</button>
+    <button class="btn" id="rules-probe-all">全部测速</button>
     <button class="btn" id="rules-sel-refresh">立即刷新规则源</button>
     <span class="spacer"></span>
     <span class="hint" id="rules-count"></span>
@@ -494,6 +495,27 @@ $("#rules-body").addEventListener("click", async e => {
 });
 $("#rules-filter").addEventListener("input", renderRules);
 $("#rules-refresh").addEventListener("click", loadRules);
+
+// 全部测速：分批并发（4）逐域强制重测，每批后刷新表格；离开页面即中止
+let probeAllRunning = false;
+$("#rules-probe-all").addEventListener("click", async e => {
+  if (probeAllRunning) return;
+  probeAllRunning = true;
+  const btn = e.target;
+  btn.disabled = true;
+  const domains = rulesState.all.map(r => (r.Domain || r.domain).replace(/^\*\./, ""));
+  const batch = 4;
+  for (let i = 0; i < domains.length; i += batch) {
+    const part = domains.slice(i, i + batch);
+    await Promise.all(part.map(d =>
+      api(`/api/rules/probe?domain=${encodeURIComponent(d)}`, { method: "POST" }).catch(() => null)));
+    btn.textContent = `测速中 ${Math.min(i + batch, domains.length)}/${domains.length}`;
+    await loadRules();
+  }
+  btn.textContent = "全部测速";
+  btn.disabled = false;
+  probeAllRunning = false;
+});
 $("#rules-sel-refresh").addEventListener("click", async e => {
   e.target.disabled = true;
   const body = await api("/api/rules/refresh", { method: "POST" }).catch(() => null);
