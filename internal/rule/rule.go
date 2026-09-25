@@ -55,9 +55,8 @@ func Normalize(domain, forward, fakeSNI string) Rule {
 
 // Table 规则表，支持精确与 *.suffix 通配匹配。
 type Table struct {
-	exact    map[string]Rule   // 精确域名 → 规则
-	wildcard map[string]string // 裸后缀（去 *.）→ 原始域名（仅记录，规则经 exact 匹配外回退）
-	wild    map[string]Rule   // 裸后缀 → 通配规则
+	exact map[string]Rule // 精确域名 → 规则
+	wild  map[string]Rule // 裸后缀（去 *.）→ 通配规则
 }
 
 // NewTable 构建规则表。重复域名以靠后的规则覆盖靠前的。
