@@ -134,3 +134,46 @@ func TestReprobe_ForcesRetestIgnoringCache(t *testing.T) {
 		t.Fatalf("Reprobe 应强制重测: %d → %d", afterFirst, got)
 	}
 }
+
+// Inspect 的域名与候选集必须对齐：map 迭代序随机，平行数组排序失配会
+// 把 A 域名的 IP 挂到 B 域名下（review C1 回归测试；50 轮覆盖随机序）。
+type mapResolver struct{ m map[string][]net.IP }
+
+func (r *mapResolver) Resolve(_ context.Context, d string) ([]net.IP, error) {
+	return r.m[d], nil
+}
+
+func TestInspect_DomainCandidatesStayAligned(t *testing.T) {
+	fixed := map[string]string{
+		"a.com": "1.1.1.1",
+		"b.com": "2.2.2.2",
+		"c.com": "3.3.3.3",
+	}
+	rules := make([]rule.Rule, 0, len(fixed))
+	res := &mapResolver{m: map[string][]net.IP{}}
+	for d, ipStr := range fixed {
+		rules = append(rules, rule.Rule{Domain: d, Kind: rule.KindFixedIP, Forward: ipStr})
+		res.m[d] = []net.IP{net.ParseIP(ipStr)}
+	}
+	s := New(rule.NewTable(rules), res, &fakeProber{}, 5*time.Minute)
+
+	for d := range fixed {
+		if _, err := s.Pick(context.Background(), d); err != nil {
+			t.Fatalf("Pick %s: %v", d, err)
+		}
+	}
+
+	for round := 0; round < 50; round++ {
+		infos := s.Inspect()
+		if len(infos) != len(fixed) {
+			t.Fatalf("应返回 %d 个域名，得到 %d", len(fixed), len(infos))
+		}
+		for _, info := range infos {
+			want := fixed[info.Domain]
+			if len(info.Candidates) == 0 || info.Candidates[0].IP != want {
+				t.Fatalf("round %d: 域名 %s 的候选应为 [%s]，实际 %v（域名-候选错配）",
+					round, info.Domain, want, info.Candidates)
+			}
+		}
+	}
+}

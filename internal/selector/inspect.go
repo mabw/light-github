@@ -33,21 +33,24 @@ func (s *Selector) Reprobe(ctx context.Context, domain string) ([]net.IP, error)
 }
 
 // Inspect 返回全部已探测域名的状态快照（按域名升序，UI 稳定展示）。
+// 域名与状态必须绑定后一起排序——平行数组各自排序会因 map 迭代序错配
+// （review C1：域名 A 挂上 B 的候选集，UI/手动测速返回错误数据）。
 func (s *Selector) Inspect() []DomainInfo {
-	s.mu.Lock()
-	domains := make([]string, 0, len(s.states))
-	for d := range s.states {
-		domains = append(domains, d)
+	type kv struct {
+		name string
+		st   *domainState
 	}
-	states := make([]*domainState, len(domains))
-	for i, d := range domains {
-		states[i] = s.states[d]
+	s.mu.Lock()
+	pairs := make([]kv, 0, len(s.states))
+	for d, st := range s.states {
+		pairs = append(pairs, kv{d, st})
 	}
 	s.mu.Unlock()
-	sort.Strings(domains)
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].name < pairs[j].name })
 
-	out := make([]DomainInfo, 0, len(domains))
-	for i, st := range states {
+	out := make([]DomainInfo, 0, len(pairs))
+	for _, p := range pairs {
+		st := p.st
 		st.mu.Lock()
 		if st.probedAt.IsZero() { // Preload 进行中尚未完成的分片
 			st.mu.Unlock()
@@ -62,7 +65,7 @@ func (s *Selector) Inspect() []DomainInfo {
 				Sunk:    sinkRank(c) == 1,
 			}
 		}
-		info := DomainInfo{Domain: domains[i], ProbedAt: st.probedAt, Candidates: cands}
+		info := DomainInfo{Domain: p.name, ProbedAt: st.probedAt, Candidates: cands}
 		st.mu.Unlock()
 		out = append(out, info)
 	}
