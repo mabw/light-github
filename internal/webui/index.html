@@ -218,9 +218,11 @@ details[open] summary::before{transform:rotate(90deg)}
   <pre><button class="btn copy" data-copy="g2">复制</button><code id="g2"></code></pre>
   <h2>curl 快速验证</h2>
   <pre><button class="btn copy" data-copy="g3">复制</button><code id="g3"></code></pre>
-  <h2>系统代理 / PAC</h2>
-  <p class="hint">浏览器或系统代理填 PAC 地址（白名单自动分流）：</p>
+  <h2>系统代理 / PAC（浏览器接入）</h2>
+  <p class="hint">本工具不劫持系统代理——浏览器要走加速需配置一次。推荐 PAC（白名单自动分流，其余直连）：</p>
   <pre><button class="btn copy" data-copy="g4">复制</button><code id="g4"></code></pre>
+  <p class="hint">macOS：系统设置 → 网络 → Wi‑Fi → 详细信息 → 代理 → 勾选「自动代理配置」粘贴上面的 URL。<br>
+  仅 https 站点走加速（明文 http 直连，不影响其他网站）。</p>
   <h2>WSL（Windows 宿主场景）</h2>
   <p class="hint">服务以 <code class="num">-addr 0.0.0.0 -token &lt;随机串&gt;</code> 启动后，WSL 内：</p>
   <pre><button class="btn copy" data-copy="g5">复制</button><code id="g5"></code></pre>

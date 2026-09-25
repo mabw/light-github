@@ -313,8 +313,9 @@ func (d Deps) handlePAC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var b strings.Builder
-	b.WriteString("// light-github PAC——白名单走本地代理，其余直连\n")
+	b.WriteString("// light-github PAC——白名单 https 走本地代理，其余直连\n")
 	b.WriteString("function FindProxyForURL(url, host) {\n")
+	b.WriteString("  if (url.substring(0, 6) !== \"https:\") return \"DIRECT\"; // 仅加速 https 隧道\n")
 	for _, p := range patterns {
 		fmt.Fprintf(&b, "  if (shExpMatch(host, %q)) return %q;\n", p, "PROXY "+d.Addr)
 	}

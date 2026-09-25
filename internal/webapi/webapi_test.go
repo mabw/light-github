@@ -265,6 +265,10 @@ func TestPAC(t *testing.T) {
 	if !contains(pac, "github.com") || !contains(pac, "127.0.0.1:12800") || !contains(pac, "DIRECT") {
 		t.Fatalf("PAC 应含白名单/代理地址/DIRECT: %s", pac)
 	}
+	// 仅 https 走代理（http 明文站点直连，代理不提供 absolute-form 转发）
+	if !contains(pac, `!== "https:"`) {
+		t.Fatalf("PAC 应含 scheme 判断: %s", pac)
+	}
 	if resp.Header.Get("Content-Type") == "" {
 		t.Fatal("应声明 Content-Type")
 	}
