@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -212,5 +213,49 @@ func TestManager_AllFailNoCacheReturnsError(t *testing.T) {
 	m.CachePath = filepath.Join(t.TempDir(), "nonexistent.json")
 	if _, err := m.Load(context.Background()); err == nil {
 		t.Fatal("全源失败且无缓存应返回错误")
+	}
+}
+
+// ---- Manager.Status：刷新时间与各源成败（Web UI 状态页数据） ----
+
+func TestManager_StatusReportsPerSource(t *testing.T) {
+	m := NewManager(
+		&stubSource{name: "ok-src", rules: []rule.Rule{{Domain: "github.com", Kind: rule.KindDynamic}}},
+		&stubSource{name: "bad-src", err: errors.New("boom")},
+	)
+
+	// 初始：从未刷新
+	if st := m.Status(); !st.LastRefreshAt.IsZero() {
+		t.Fatalf("未刷新时 LastRefreshAt 应为零值: %+v", st)
+	}
+
+	if _, err := m.Refresh(context.Background()); err != nil {
+		t.Fatalf("任一源成功即成功: %v", err)
+	}
+
+	st := m.Status()
+	if st.LastRefreshAt.IsZero() || !st.LastOK {
+		t.Fatalf("刷新成功应记录时间与状态: %+v", st)
+	}
+	byName := map[string]SourceState{}
+	for _, s := range st.Sources {
+		byName[s.Name] = s
+	}
+	if !byName["ok-src"].OK {
+		t.Fatalf("成功源应标记 OK: %+v", byName["ok-src"])
+	}
+	if byName["bad-src"].OK || byName["bad-src"].Err != "boom" {
+		t.Fatalf("失败源应携带错误: %+v", byName["bad-src"])
+	}
+}
+
+func TestManager_StatusAllFailed(t *testing.T) {
+	m := NewManager(&stubSource{name: "only", err: errors.New("down")})
+
+	if _, err := m.Refresh(context.Background()); err == nil {
+		t.Fatal("全源失败应报错")
+	}
+	if st := m.Status(); st.LastOK {
+		t.Fatalf("全失败时 LastOK 应为 false: %+v", st)
 	}
 }
