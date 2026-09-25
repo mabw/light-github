@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -46,6 +48,7 @@ func newStack(t *testing.T, dialer Dialer) (*url.URL, *Server) {
 		Dialer:      dialer,
 		Metrics:     metrics.NewStore(time.Second),
 		DialTimeout: 500 * time.Millisecond,
+		IdleTimeout: 150 * time.Millisecond, // DEBT-2：测试用短空闲超时
 	}
 	addr, err := proxySrv.ListenAndServe(context.Background())
 	if err != nil {
@@ -212,5 +215,54 @@ func TestProxy_SetTableHotSwapsRules(t *testing.T) {
 	_, _ = proxiedClient(t, proxyURL).Get("https://accel.test:" + upPort + "/")
 	if dialer.picks != 1 {
 		t.Fatalf("换表后不应再走选路: picks=%d", dialer.picks)
+	}
+}
+
+// DEBT-2：空闲隧道必须在 IdleTimeout 附近被双向关闭（防 goroutine 泄漏）
+func TestProxy_IdleTimeoutClosesTunnel(t *testing.T) {
+	// 挂起上游：accept 后保持连接但不读不写
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		var held []net.Conn
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			held = append(held, c) // 持有不断开，制造永久挂起
+		}
+	}()
+	_, upPort, _ := net.SplitHostPort(ln.Addr().String())
+
+	dialer := &fakeDialer{ips: []net.IP{net.ParseIP("127.0.0.1")}}
+	proxyURL, _ := newStack(t, dialer)
+
+	// 原始 TCP 客户端：发 CONNECT → 收 200 → 之后静默等待
+	c, err := net.Dial("tcp", proxyURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := fmt.Fprintf(c, "CONNECT accel.test:%s HTTP/1.1\r\nHost: accel.test:%s\r\n\r\n", upPort, upPort); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(c)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("CONNECT 应成功: resp=%v err=%v", resp, err)
+	}
+
+	// 双向无字节的隧道应在 IdleTimeout(150ms) 附近被服务器关闭
+	start := time.Now()
+	_, err = br.ReadByte()
+	if err == nil {
+		t.Fatal("挂起上游不应返回数据")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("空闲隧道应在 IdleTimeout 附近关闭，实际挂了 %v", elapsed)
 	}
 }

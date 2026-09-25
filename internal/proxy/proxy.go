@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/marvin/light-github/internal/metrics"
@@ -40,6 +41,7 @@ type Server struct {
 	Dialer      Dialer
 	Metrics     *metrics.Store
 	DialTimeout time.Duration // 单候选拨号超时；零值默认 5s
+	IdleTimeout time.Duration // 隧道空闲超时（DEBT-2）；零值默认 5min
 
 	mu    sync.RWMutex
 	table *rule.Table
@@ -93,6 +95,10 @@ func (s *Server) Close() error {
 func (s *Server) handleConn(client net.Conn) {
 	defer client.Close()
 
+	// 连接级 ctx（DEBT-5）：拨号与隧道均绑定本连接生命周期，连接结束即取消
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	req, err := http.ReadRequest(bufioReader(client))
 	if err != nil {
 		return
@@ -101,10 +107,10 @@ func (s *Server) handleConn(client net.Conn) {
 		_ = writeSimpleResponse(client, http.StatusBadRequest, "only CONNECT supported")
 		return
 	}
-	s.handleConnect(client, req)
+	s.handleConnect(ctx, cancel, client, req)
 }
 
-func (s *Server) handleConnect(client net.Conn, req *http.Request) {
+func (s *Server) handleConnect(ctx context.Context, cancel context.CancelFunc, client net.Conn, req *http.Request) {
 	host := req.URL.Host // host:port
 	domain, port, err := net.SplitHostPort(host)
 	if err != nil || port == "" {
@@ -120,10 +126,15 @@ func (s *Server) handleConnect(client net.Conn, req *http.Request) {
 	)
 	if _, accelerated := s.currentTable().Match(domain); accelerated {
 		via = "accel"
-		ips, err := s.Dialer.Pick(context.Background(), domain)
-		if err == nil {
+		ips, perr := s.Dialer.Pick(ctx, domain)
+		if perr == nil {
+			var d net.Dialer
+			d.Timeout = s.dialTimeout()
 			for _, ip := range ips {
-				conn, derr := net.DialTimeout("tcp", net.JoinHostPort(ip.String(), port), s.dialTimeout())
+				if ctx.Err() != nil {
+					break // 客户端已断开，停止尝试后续候选
+				}
+				conn, derr := d.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
 				if derr == nil {
 					upstream, usedIP = conn, ip
 					s.Dialer.ReportSuccess(domain, ip)
@@ -134,7 +145,9 @@ func (s *Server) handleConnect(client net.Conn, req *http.Request) {
 		}
 	} else {
 		via = "direct"
-		upstream, err = net.DialTimeout("tcp", host, s.dialTimeout())
+		var d net.Dialer
+		d.Timeout = s.dialTimeout()
+		upstream, err = d.DialContext(ctx, "tcp", host)
 	}
 
 	if upstream == nil {
@@ -151,23 +164,70 @@ func (s *Server) handleConnect(client net.Conn, req *http.Request) {
 		return
 	}
 
-	up, down := tunnel(client, upstream)
+	up, down := tunnel(ctx, cancel, client, upstream, s.idleTimeout())
 	s.record(domain, via, usedIP, start, up, down, true, "")
 }
 
-// tunnel 双向搬运并半关闭，返回 (客户端→上游, 上游→客户端) 字节数
-func tunnel(a, b net.Conn) (int64, int64) {
+// countingWriter 记录写入进度的包装（watchdog 据此判断空闲）
+type countingWriter struct {
+	w io.Writer
+	n *atomic.Int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+// tunnel 双向搬运并半关闭，返回 (客户端→上游, 上游→客户端) 字节数。
+// DEBT-2：空闲超过 idleTimeout 即双向强制关闭，防止半开连接泄漏 goroutine。
+func tunnel(ctx context.Context, cancel context.CancelFunc, a, b net.Conn, idleTimeout time.Duration) (int64, int64) {
+	var up, down atomic.Int64
 	done := make(chan int64, 2)
-	cp := func(dst io.Writer, src io.Reader) {
-		n, _ := io.Copy(dst, src)
+	cp := func(dst io.Writer, counter *atomic.Int64, src io.Reader) {
+		n, _ := io.Copy(&countingWriter{w: dst, n: counter}, src)
 		if tc, ok := dst.(*net.TCPConn); ok {
 			_ = tc.CloseWrite()
 		}
 		done <- n
 	}
-	go cp(b, a)
-	go cp(a, b)
-	return <-done, <-done
+	go cp(b, &up, a)
+	go cp(a, &down, b)
+
+	finished := make(chan struct{})
+	defer close(finished)
+	tick := idleTimeout / 4
+	if tick <= 0 {
+		tick = 50 * time.Millisecond
+	}
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
+	go func() {
+		var lastUp, lastDown int64 = -1, -1
+		for {
+			select {
+			case <-finished:
+				return
+			case <-ctx.Done():
+				_ = a.Close()
+				_ = b.Close()
+				return
+			case <-ticker.C:
+				cu, cd := up.Load(), down.Load()
+				if cu == lastUp && cd == lastDown { // 一个检测周期内零字节
+					_ = a.Close()
+					_ = b.Close()
+					return
+				}
+				lastUp, lastDown = cu, cd
+			}
+		}
+	}()
+
+	u, d := <-done, <-done
+	cancel() // 任一方向结束后取消 ctx，促使另一方向的 watchdog/读写尽快收尾
+	return u, d
 }
 
 func (s *Server) record(domain, via string, ip net.IP, start time.Time, up, down int64, ok bool, errMsg string) {
@@ -190,4 +250,11 @@ func (s *Server) dialTimeout() time.Duration {
 		return s.DialTimeout
 	}
 	return 5 * time.Second
+}
+
+func (s *Server) idleTimeout() time.Duration {
+	if s.IdleTimeout > 0 {
+		return s.IdleTimeout
+	}
+	return 5 * time.Minute
 }
