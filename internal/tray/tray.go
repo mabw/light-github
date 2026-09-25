@@ -14,12 +14,9 @@ import (
 	"github.com/energye/systray"
 )
 
-// template 图标：GitHub Octicons mark-github（黑色 + alpha），
-// macOS 经 SetTemplateIcon 自动适配浅/深菜单栏。@1x/@2x 两份。
+// template 图标：GitHub Octicons mark-github（黑色 + alpha，256px 矢量直渲
+// 后 BOX 面积采样降至 32px）。macOS 经 SetTemplateIcon 自动适配浅/深菜单栏。
 //
-//go:embed assets/icon16.png
-var icon16 []byte
-
 //go:embed assets/icon32.png
 var icon32 []byte
 
@@ -104,7 +101,9 @@ func Run(ctx context.Context, deps Deps, cleanup func()) error {
 }
 
 func onReady(deps Deps) {
-	systray.SetTemplateIcon(icon16, icon32) // Windows/Linux 分支同 API，等效 SetIcon
+	// 库 darwin 实现只用第一参数（单 PNG + setSize 16pt）：传 32px 源，
+	// retina @2x 原生像素匹配零缩放（16px 源会被系统上采样→糊/毛刺，实证）
+	systray.SetTemplateIcon(icon32, icon32)
 	systray.SetTooltip(tooltip(deps.Version))
 
 	m := menuSet{

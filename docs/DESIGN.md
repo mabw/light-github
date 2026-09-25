@@ -155,9 +155,9 @@ type Rule struct {
 
 | 能力 | macOS | Windows | Linux |
 |---|---|---|---|
-| 托盘/菜单栏 | `energye/systray` v1.0.3（spike-d 已验证：CGO 编译链 OK、2.9MB 单二进制；注意其 API 与 getlantern 原版不同——菜单项为回调式 `Click(fn)`，macOS 左键点击需 `SetOnClick(m.ShowMenu)` 才弹菜单；图标为 template PNG 需 @1x/@2x 抗锯齿两套） | 同左 | 同左（XDG AppIndicator） |
-| 开机自启 | `SMAppService`（Login Items，via `go-hybrid/cocoa` 或 exec `osascript`） | 注册表 `HKCU\...\Run`（无 UAC） | `~/.config/autostart/*.desktop` 或 systemd user unit |
-| 桌面图标/窗口 | 仅菜单栏（默认）或常驻 Dock（点击=浏览器打开 UI） | 托盘 + 快捷方式（打开 UI） | 托盘 + .desktop（打开 UI） |
+| 托盘/菜单栏 | `energye/systray` v1.0.3（spike-d 已验证：CGO 编译链 OK、2.9MB 单二进制；注意其 API 与 getlantern 原版不同——菜单项为回调式 `Click(fn)`，macOS 左键点击需 `SetOnClick(m.ShowMenu)` 才弹菜单；图标为 template PNG 需 @1x/@2x 抗锯齿两套）。**Quit 语义（darwin 实证）：`systray.Quit()` 即 `[NSApp terminate:]`，进程随即终止且不返回 Go——退出清理必须先于 Quit 同步完成**（`tray.Run(ctx, deps, cleanup)` 契约） | 同左 | 同左（XDG AppIndicator） |
+| 开机自启 | `~/Library/LaunchAgents/com.marvin.light-github.plist`（写入/删除即生效于下次登录，不立即双开） | 注册表 `HKCU\...\Run`（无 UAC） | `~/.config/autostart/*.desktop` |
+| 桌面图标/窗口 | 仅菜单栏（实证：CGO 进程不注册 Dock）；`--no-tray` headless | 托盘 + 快捷方式（打开 UI） | 托盘 + .desktop（打开 UI） |
 
 - 桌面窗口 = 内嵌 WebView 加载 §3.6 页面；`--headless` 模式跳过窗口仅托盘+Web
 
@@ -196,7 +196,7 @@ type Rule struct {
 | **M0 spike** ✅ 2026-09-25 完成 | 结论见 docs/SPIKE-RESULT.md | 4 个风险点全部验证通过 |
 | **M1 核心 CLI** ✅ 2026-09-25 完成 | proxy + selector + source + metrics，headless 运行 | `git clone` 经代理 1.49s（直连 16.8s）；`-race` 全绿 |
 | **M2 Web UI** ✅ 2026-09-25 完成 | 控制台（单文件页 + 7 端点）+ 双通道日志 + 配置持久化 | 见 §6.1；11 包 `-race` 全绿 |
-| **M3 平台层** | 托盘/自启/桌面窗口 | 三平台手工验证清单通过 |
+| **M3 平台层** ✅ 2026-09-26（macOS） | 托盘（octocat 图标/状态总闸/三开关菜单）+ 三平台自启 + `-no-tray` headless | macOS 全项实测（加速开关/PAC 接入还原/自启 plist/SIGTERM 与托盘退出清理闭环）；Windows/Linux 真机验证 → DEBT-8（M4） |
 | **M4 发布** | goreleaser + 安装文档 | 三平台产物 + 一键接入文档 |
 
 ### 6.1 M2 架构要点（2026-09-25 定稿实现）

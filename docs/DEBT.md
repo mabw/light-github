@@ -80,3 +80,10 @@
 - **影响**：M4 三平台分发前必须真机过一遍；WinINET 即时生效问题可能需要改用 syscall（InternetSetOption）。
 - **目标**：M4。
 
+### DEBT-8 🟢 tray/autostart 的 Windows/Linux 分支未经真机验证
+
+- **位置**：`internal/tray/tray.go`（systray 交互）、`internal/autostart/autostart_windows.go`、`autostart_linux.go`
+- **描述**：macOS 全项实测（图标/菜单/开关闭环/退出清理）。未验证部分：① Windows/Linux 的 systray 菜单渲染与回调（XDG AppIndicator 依赖桌面环境）；② **非 darwin 平台的 `systray.Quit()` 语义**——darwin 是进程终止，Win/Linux 上 `systray.Run` 可能正常返回、`shutdown()` 由 main 底部兜底执行（`sync.Once` 已防重，逻辑上闭环，未实测）；③ HKCU Run / XDG autostart 写入效果。
+- **影响**：M4 三平台分发前真机过一遍；若 Win/Linux 上 Quit 后 Run 不返回，需在 `tray.Run` 返回路径上加超时兜底。
+- **目标**：M4。
+
