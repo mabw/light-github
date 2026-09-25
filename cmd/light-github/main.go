@@ -28,6 +28,7 @@ import (
 	"github.com/marvin/light-github/internal/rule"
 	"github.com/marvin/light-github/internal/selector"
 	"github.com/marvin/light-github/internal/source"
+	"github.com/marvin/light-github/internal/sysproxy"
 	"github.com/marvin/light-github/internal/webapi"
 )
 
@@ -143,6 +144,9 @@ func main() {
 		log.Info("规则已更新", "count", len(newRules))
 	}
 
+	// 系统代理一键接入用的 PAC 地址（0.0.0.0 对本机浏览器无意义，归一为回环）
+	pacURL := "http://" + loopbackAddr(cfg.Addr) + "/pac"
+
 	deps := &webapi.Deps{
 		Version:   version,
 		StartedAt: time.Now(),
@@ -183,6 +187,22 @@ func main() {
 			}
 		},
 		AccelEnabled: func() bool { return srv.Enabled() },
+		SetSysProxy: func(on bool) error {
+			if on {
+				if err := sysproxy.Enable(pacURL); err != nil {
+					log.Warn("系统代理接入失败", "err", err)
+					return err
+				}
+				log.Info("系统代理已接入（PAC）", "url", pacURL, "note", "与其他代理软件的系统代理互斥")
+			} else {
+				if err := sysproxy.Disable(); err != nil {
+					return err
+				}
+				log.Info("系统代理已还原")
+			}
+			return nil
+		},
+		SysProxyState: func() bool { return sysproxy.Enabled(pacURL) },
 	}
 
 	// 代理（与控制台共用端口：CONNECT→隧道；origin-form→Web）
@@ -230,6 +250,15 @@ func main() {
 	<-ctx.Done()
 	log.Info("正在退出…")
 	_ = srv.Close()
+
+	// 退出清理：系统 PAC 指向我们时还原，避免浏览器悬空（零侵入承诺的完整闭环）
+	if sysproxy.Enabled(pacURL) {
+		if err := sysproxy.Disable(); err == nil {
+			log.Info("退出时已还原系统代理设置")
+		} else {
+			log.Warn("退出时还原系统代理失败", "err", err)
+		}
+	}
 
 	snap := store.Snapshot()
 	log.Info("本次会话统计",
@@ -302,4 +331,16 @@ func tokenState(token string) string {
 		return "off"
 	}
 	return "on"
+}
+
+// loopbackAddr 把监听地址归一为浏览器可用的回环形态（0.0.0.0:12800 → 127.0.0.1:12800）
+func loopbackAddr(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	if ip := net.ParseIP(host); ip == nil || ip.IsUnspecified() {
+		return net.JoinHostPort("127.0.0.1", port)
+	}
+	return addr
 }

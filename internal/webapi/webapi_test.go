@@ -370,3 +370,37 @@ func TestAccelToggle(t *testing.T) {
 		t.Fatalf("status 应反映关闭: %v", body3)
 	}
 }
+
+// 系统代理端点：POST 接入/还原，status 反映状态
+func TestSysProxyEndpoint(t *testing.T) {
+	deps := newDeps(t, config.Config{})
+	state := false
+	deps.SetSysProxy = func(on bool) error { state = on; return nil }
+	deps.SysProxyState = func() bool { return state }
+
+	srv := httptest.NewServer(Handler(deps))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/api/sysproxy", "application/json", stringReader(`{"on":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || body["success"] != true || !state {
+		t.Fatalf("接入系统代理: %d %v state=%v", resp.StatusCode, body, state)
+	}
+
+	_, st := get(t, srv.URL+"/api/status")
+	if st["data"].(map[string]any)["sysProxy"] != true {
+		t.Fatalf("status 应反映系统代理状态: %v", st)
+	}
+
+	// 坏 body → 400
+	resp2, _ := http.Post(srv.URL+"/api/sysproxy", "application/json", stringReader(`{bad`))
+	resp2.Body.Close()
+	if resp2.StatusCode != 400 {
+		t.Fatalf("坏 body 应 400: %d", resp2.StatusCode)
+	}
+}

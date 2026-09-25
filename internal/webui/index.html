@@ -228,10 +228,17 @@ details[open] summary::before{transform:rotate(90deg)}
   <h2>curl 快速验证</h2>
   <pre><button class="btn copy" data-copy="g3">复制</button><code id="g3"></code></pre>
   <h2>系统代理 / PAC（浏览器接入）</h2>
-  <p class="hint">本工具不劫持系统代理——浏览器要走加速需配置一次。推荐 PAC（白名单自动分流，其余直连）：</p>
+  <div style="display:flex;gap:.6rem;align-items:center;margin-bottom:.7rem;flex-wrap:wrap">
+    <button class="btn primary" id="sysproxy-on">一键接入系统代理</button>
+    <button class="btn" id="sysproxy-off" hidden>断开系统代理</button>
+    <span class="hint" id="sysproxy-state">由程序设置/还原 PAC，无需手动配置</span>
+  </div>
+  <p class="hint">或手动配置 PAC（白名单自动分流，其余直连）：</p>
   <pre><button class="btn copy" data-copy="g4">复制</button><code id="g4"></code></pre>
   <p class="hint">macOS：系统设置 → 网络 → Wi‑Fi → 详细信息 → 代理 → 勾选「自动代理配置」粘贴上面的 URL。<br>
   仅 https 站点走加速（明文 http 直连，不影响其他网站）。</p>
+  <p class="hint"><b>⚠ 与 Clash/Surge 等的系统代理互斥</b>：PAC 与手动代理共用系统设置位，后设置者生效——
+  需要全局代理环境时请用上面的 git/终端方式接入本工具，不要一键接入。</p>
   <h2>WSL（Windows 宿主场景）</h2>
   <p class="hint">服务以 <code class="num">-addr 0.0.0.0 -token &lt;随机串&gt;</code> 启动后，WSL 内：</p>
   <pre><button class="btn copy" data-copy="g5">复制</button><code id="g5"></code></pre>
@@ -372,6 +379,10 @@ async function pollStatus() {
   const on = d.accelerating !== false;
   $("#accel-toggle").className = on ? "on" : "off";
   $("#accel-label").textContent = on ? "加速中" : "已直通";
+  const sp = !!d.sysProxy;
+  $("#sysproxy-on").hidden = sp;
+  $("#sysproxy-off").hidden = !sp;
+  $("#sysproxy-state").textContent = sp ? "已接入：浏览器自动走加速（退出时自动还原）" : "由程序设置/还原 PAC，无需手动配置";
   $("#s-sources").innerHTML = (d.sources || []).map(s =>
     `<div style="display:flex;gap:.6rem;align-items:baseline;padding:.3rem 0">
       <span class="dot ${s.ok ? "ok" : "bad"}"></span>
@@ -392,6 +403,25 @@ $("#accel-toggle").addEventListener("click", async () => {
     $("#accel-label").textContent = on ? "加速中" : "已直通";
   }
 });
+
+/* ---- 系统代理一键接入/还原 ---- */
+async function setSysProxy(on) {
+  const state = $("#sysproxy-state");
+  state.textContent = on ? "正在接入…" : "正在还原…";
+  const resp = await api("/api/sysproxy", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ on }),
+  }).catch(() => null);
+  if (resp && resp.success) {
+    $("#sysproxy-on").hidden = on;
+    $("#sysproxy-off").hidden = !on;
+    state.textContent = on ? "已接入：浏览器自动走加速（退出时自动还原）" : "已还原为直连";
+  } else {
+    state.textContent = (resp && resp.error) || "操作失败";
+  }
+}
+$("#sysproxy-on").addEventListener("click", () => setSysProxy(true));
+$("#sysproxy-off").addEventListener("click", () => setSysProxy(false));
 
 /* ---- 连接日志 ---- */
 async function pollConns() {

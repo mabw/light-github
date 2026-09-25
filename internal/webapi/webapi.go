@@ -47,6 +47,10 @@ type Deps struct {
 	// 加速开关（托盘与控制台共用）；nil 时端点 503、status 报告 true
 	SetAccel     func(on bool)
 	AccelEnabled func() bool
+
+	// 系统代理（PAC 一键接入/还原）；nil 时端点 503
+	SetSysProxy func(on bool) error
+	SysProxyState func() bool
 }
 
 // envelope 统一响应信封（全局 API 规范：success/data/error）。
@@ -68,6 +72,7 @@ func Handler(d *Deps) http.Handler {
 	mux.HandleFunc("/api/rules/probe", d.handleProbe)
 	mux.HandleFunc("/api/config", d.handleConfig)
 	mux.HandleFunc("/api/accel", d.handleAccel)
+	mux.HandleFunc("/api/sysproxy", d.handleSysProxy)
 	mux.HandleFunc("/pac", d.handlePAC)
 	mux.Handle("/", webui.Handler()) // 兜底：控制台单页
 	return d.auth(mux)
@@ -111,12 +116,17 @@ func (d Deps) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if d.AccelEnabled != nil {
 		accelerating = d.AccelEnabled()
 	}
+	sysProxy := false
+	if d.SysProxyState != nil {
+		sysProxy = d.SysProxyState()
+	}
 	writeJSON(w, http.StatusOK, envelope{Success: true, Data: map[string]any{
 		"version":      d.Version,
 		"uptime":       time.Since(d.StartedAt).String(),
 		"addr":         d.Addr,
 		"ruleCount":    ruleCount,
 		"accelerating": accelerating,
+		"sysProxy":     sysProxy,
 		"lastRefresh":  src.LastRefreshAt.Format(time.RFC3339),
 		"lastOk":       src.LastOK,
 		"sources":      src.Sources,
@@ -233,6 +243,35 @@ func (d Deps) handleAccel(w http.ResponseWriter, r *http.Request) {
 	}
 	d.SetAccel(*req.On)
 	writeJSON(w, http.StatusOK, envelope{Success: true, Data: map[string]any{"accelerating": d.AccelEnabled()}})
+}
+
+// handleSysProxy 一键接入/还原系统代理（PAC）。
+// 注意与"接管系统代理"类工具（Clash 系统代理等）互斥——后设置者生效。
+func (d Deps) handleSysProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, envelope{Error: "method"})
+		return
+	}
+	if d.SetSysProxy == nil {
+		writeJSON(w, http.StatusServiceUnavailable, envelope{Error: "系统代理能力未接入"})
+		return
+	}
+	var req struct {
+		On *bool `json:"on"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&req); err != nil || req.On == nil {
+		writeJSON(w, http.StatusBadRequest, envelope{Error: `body 须为 {"on":bool}`})
+		return
+	}
+	if err := d.SetSysProxy(*req.On); err != nil {
+		writeJSON(w, http.StatusInternalServerError, envelope{Success: false, Error: err.Error()})
+		return
+	}
+	state := false
+	if d.SysProxyState != nil {
+		state = d.SysProxyState()
+	}
+	writeJSON(w, http.StatusOK, envelope{Success: true, Data: map[string]any{"sysProxy": state}})
 }
 
 // handleProbe 单域名强制重测（忽略测速缓存；规则页行内测速按钮）。
