@@ -221,15 +221,41 @@ type Manager struct {
 
 	// CachePath 规则缓存落盘路径（JSON）；空则不落盘。
 	CachePath string
+
+	stateMu sync.Mutex
+	state   RefreshState // 最近一次刷新状态（Status 读取）
+}
+
+// SourceState 单个数据源的最近拉取结果。
+type SourceState struct {
+	Name string `json:"name"`
+	OK   bool   `json:"ok"`
+	Err  string `json:"err,omitempty"`
+}
+
+// RefreshState 最近一次刷新的状态（Web UI 状态页数据形状）。
+type RefreshState struct {
+	LastRefreshAt time.Time     `json:"lastRefreshAt"`
+	LastOK        bool          `json:"lastOk"`
+	RuleCount     int           `json:"ruleCount"`
+	Sources       []SourceState `json:"sources"`
 }
 
 // NewManager 构造管理器；sources 按优先级降序排列（靠前的同名规则胜出）。
 func NewManager(sources ...Fetcher) *Manager { return &Manager{sources: sources} }
 
+// Status 返回最近一次刷新的状态。
+func (m *Manager) Status() RefreshState {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	return m.state
+}
+
 // fetchResult 单源拉取结果（order 为源优先级序号）
 type fetchResult struct {
 	order int
 	rules []rule.Rule
+	err   error
 }
 
 // Refresh 并发拉取全部源，合并为单一规则表并写缓存。
@@ -248,23 +274,60 @@ func (m *Manager) Refresh(ctx context.Context) ([]rule.Rule, error) {
 			rules, err := src.Fetch(ctx)
 			mu.Lock()
 			defer mu.Unlock()
-			if err != nil {
-				return
-			}
-			results = append(results, fetchResult{order: order, rules: rules})
+			results = append(results, fetchResult{order: order, rules: rules, err: err})
 		}(i, src)
 	}
 	wg.Wait()
 
-	if len(results) == 0 {
-		return nil, errors.New("source: all sources failed")
+	// 记录各源状态（定时刷新与手动刷新可能并发，加锁）
+	states := make([]SourceState, len(results))
+	for i, res := range results {
+		states[i] = SourceState{Name: m.sources[res.order].Name(), OK: res.err == nil}
+		if res.err != nil {
+			states[i].Err = res.err.Error()
+		}
+	}
+	sortResults(results)
+
+	var (
+		mergedRules []rule.Rule
+		refreshErr  error
+	)
+	var okCount int
+	for _, res := range results {
+		if res.err == nil {
+			okCount++
+		}
+	}
+	if okCount == 0 {
+		refreshErr = errors.New("source: all sources failed")
+	} else {
+		mergedRules = m.merge(results)
 	}
 
-	// 按源优先级顺序合并：先到者的域名占位，后来者仅补充新域名
+	m.stateMu.Lock()
+	m.state = RefreshState{
+		LastRefreshAt: time.Now(),
+		LastOK:        refreshErr == nil,
+		RuleCount:     len(mergedRules),
+		Sources:       states,
+	}
+	m.stateMu.Unlock()
+
+	if refreshErr != nil {
+		return nil, refreshErr
+	}
+	return mergedRules, nil
+}
+
+// merge 按源优先级合并：先到者的域名占位，后来者仅补充新域名。
+func (m *Manager) merge(results []fetchResult) []rule.Rule {
 	merged := map[string]rule.Rule{}
 	var order []string
-	sortResults(results)
 	for _, res := range results {
+		if res.err != nil {
+			continue
+		}
 		for _, r := range res.rules {
 			if _, exists := merged[r.Domain]; !exists {
 				merged[r.Domain] = r
@@ -277,12 +340,12 @@ func (m *Manager) Refresh(ctx context.Context) ([]rule.Rule, error) {
 		rules = append(rules, merged[d])
 	}
 
-	if m.CachePath != "" {
+	if m.CachePath != "" && len(rules) > 0 {
 		if b, err := json.Marshal(rules); err == nil {
 			_ = os.WriteFile(m.CachePath, b, 0o600)
 		}
 	}
-	return rules, nil
+	return rules
 }
 
 // Load 优先 Refresh；全源失败时回退本地缓存（rules.json，Refresh 成功时写入）。
