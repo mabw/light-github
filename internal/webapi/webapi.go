@@ -30,9 +30,9 @@ type Deps struct {
 	Addr      string // 代理监听地址（PAC/指引展示用）
 	Token     string // 非空时 /api/* 需要凭据（?token= 或 Bearer）
 
-	Metrics *metrics.Store
-	Logs    *logx.Manager
-	Source  *source.Manager
+	Metrics  *metrics.Store
+	Logs     *logx.Manager
+	Source   *source.Manager
 	Selector *selector.Selector
 
 	Rules func() []rule.Rule // 当前规则快照
@@ -51,7 +51,7 @@ type Deps struct {
 	AccelEnabled func() bool
 
 	// 系统代理（PAC 一键接入/还原）；nil 时端点 503
-	SetSysProxy func(on bool) error
+	SetSysProxy   func(on bool) error
 	SysProxyState func() bool
 }
 

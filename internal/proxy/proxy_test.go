@@ -235,6 +235,7 @@ func TestProxy_IdleTimeoutClosesTunnel(t *testing.T) {
 				return
 			}
 			held = append(held, c) // 持有不断开，制造永久挂起
+			_ = held               // 读引用：防 finalizer 关闭 fd，亦消除 SA4010 死写入判定
 		}
 	}()
 	_, upPort, _ := net.SplitHostPort(ln.Addr().String())
@@ -417,9 +418,9 @@ func TestSetEnabled_DisabledAcceleratesNothing(t *testing.T) {
 	t.Cleanup(upstream.Close)
 	// 直通目标即上游本身（127.0.0.1，不在规则表时也直通；本用例验证"关闭后规则形同虚设"）
 	proxySrv := &Server{
-		Addr:  "127.0.0.1:0",
-		Table: rule.NewTable([]rule.Rule{{Domain: "accel.test", Kind: rule.KindDynamic}}),
-		Dialer: &fakeDialer{ips: []net.IP{net.ParseIP("240.0.0.1")}}, // 若走选路必失败（保留地址）
+		Addr:        "127.0.0.1:0",
+		Table:       rule.NewTable([]rule.Rule{{Domain: "accel.test", Kind: rule.KindDynamic}}),
+		Dialer:      &fakeDialer{ips: []net.IP{net.ParseIP("240.0.0.1")}}, // 若走选路必失败（保留地址）
 		Metrics:     metrics.NewStore(time.Second),
 		DialTimeout: 300 * time.Millisecond,
 	}
@@ -461,5 +462,24 @@ func TestSetEnabled_DisabledAcceleratesNothing(t *testing.T) {
 	proxySrv.SetEnabled(true)
 	if _, err := client.Get("https://accel.test/"); err == nil {
 		t.Fatal("重新开启后应恢复走选路（必失败）")
+	}
+}
+
+// 绑定后校验：非回环地址 + 空 Token 必须拒绝启动（review C3——
+// hostname/省略 host 等间接形态只有真实绑定才能识别）
+func TestListenAndServe_RejectsNonLoopbackWithoutToken(t *testing.T) {
+	s := &Server{Addr: "0.0.0.0:0"}
+	if _, err := s.ListenAndServe(context.Background()); err == nil {
+		t.Fatal("非回环无 token 应拒绝启动")
+	}
+
+	s2 := &Server{Addr: "0.0.0.0:0", Token: "x"}
+	addr, err := s2.ListenAndServe(context.Background())
+	if err != nil {
+		t.Fatalf("带 token 应允许: %v", err)
+	}
+	defer s2.Close()
+	if addr == nil {
+		t.Fatal("应返回监听地址")
 	}
 }

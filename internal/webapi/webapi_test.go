@@ -287,7 +287,7 @@ func TestPAC(t *testing.T) {
 	srv := httptest.NewServer(Handler(newDeps(t, config.Config{})))
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL+"/pac")
+	resp, err := http.Get(srv.URL + "/pac")
 	if err != nil {
 		t.Fatal(err)
 	}

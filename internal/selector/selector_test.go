@@ -40,11 +40,6 @@ func (f *fakeProber) Probe(_ context.Context, ip net.IP) time.Duration {
 
 func ip(s string) net.IP { return net.ParseIP(s) }
 
-func newSel(r rule.Rule) *Selector {
-	tbl := rule.NewTable([]rule.Rule{r})
-	return New(tbl, &fakeResolver{}, &fakeProber{}, 5*time.Minute)
-}
-
 // ---- 候选生成：三种规则策略 ----
 
 func TestPick_FixedIPRulePutsFixedFirstWithDoHBackup(t *testing.T) {

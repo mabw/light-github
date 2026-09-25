@@ -27,9 +27,9 @@ func TestLoadRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 
 	want := Config{
-		Addr:    "0.0.0.0:12800",
-		Token:   "t0k3n",
-		Refresh: 2 * time.Hour,
+		Addr:     "0.0.0.0:12800",
+		Token:    "t0k3n",
+		Refresh:  2 * time.Hour,
 		LogLevel: "debug",
 	}
 	if err := Save(path, want); err != nil {

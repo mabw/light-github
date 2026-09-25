@@ -38,8 +38,8 @@ import (
 )
 
 const (
-	version         = "0.3.0"
-	steamppAPI      = "https://api.steampp.net/accelerator/projectgroups"
+	version            = "0.3.0"
+	steamppAPI         = "https://api.steampp.net/accelerator/projectgroups"
 	github520HostsJSON = "https://raw.hellogithub.com/hosts.json"
 )
 
@@ -233,9 +233,9 @@ func main() {
 			applyRules(newRules)
 			return len(newRules), nil
 		},
-		SetAccel:     setAccel,
-		AccelEnabled: func() bool { return srv.Enabled() },
-		SetSysProxy:  setSysProxy,
+		SetAccel:      setAccel,
+		AccelEnabled:  func() bool { return srv.Enabled() },
+		SetSysProxy:   setSysProxy,
 		SysProxyState: func() bool { return sysproxy.Enabled(pacURL) },
 	}
 
@@ -339,11 +339,19 @@ func main() {
 	}
 }
 
-// validateListen 非 loopback 监听必须配置 Token（DEBT-6：0.0.0.0 会把未鉴权代理暴露给局域网）
+// validateListen 非 loopback 监听必须配置 Token（DEBT-6：0.0.0.0 会把未鉴权代理暴露给局域网）。
+// 前置快速校验（字面形态）；hostname 等间接形态由 proxy.ListenAndServe 的
+// 真实绑定校验兜底（review C3：":12800" 曾因 ParseIP("")==nil 绕过此处）。
 func validateListen(addr, token string) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return fmt.Errorf("地址格式错误: %w", err)
+	}
+	if host == "" { // 省略 host = [::] 全网卡
+		if token == "" {
+			return fmt.Errorf("-addr %s 省略主机名即监听全部网卡，必须配置 token", addr)
+		}
+		return nil
 	}
 	ip := net.ParseIP(host)
 	if ip != nil && !ip.IsLoopback() && token == "" {

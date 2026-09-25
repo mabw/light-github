@@ -22,10 +22,10 @@ func TestStatusTitle(t *testing.T) {
 func TestDepsValidate(t *testing.T) {
 	base := func() Deps {
 		return Deps{
-			Version: "test",
-			UIURL:   "http://127.0.0.1:12800",
-			OpenUI:  func() {},
-			Quit:    func() {},
+			Version:     "test",
+			UIURL:       "http://127.0.0.1:12800",
+			OpenUI:      func() {},
+			Quit:        func() {},
 			ToggleAccel: func(bool) {},
 			AccelState:  func() bool { return true },
 		}

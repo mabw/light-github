@@ -113,10 +113,16 @@ func (s *Server) currentTable() *rule.Table {
 }
 
 // ListenAndServe 启动监听并在后台 accept，返回实际监听地址。
+// 绑定后校验真实地址：非回环且无 Token 时拒绝启动——字面校验拦不住
+// hostname/省略 host 等间接形态（review C3，未鉴权代理不可暴露给局域网）。
 func (s *Server) ListenAndServe(context.Context) (net.Addr, error) {
 	ln, err := net.Listen("tcp", s.Addr)
 	if err != nil {
 		return nil, err
+	}
+	if tcp, ok := ln.Addr().(*net.TCPAddr); ok && !tcp.IP.IsLoopback() && s.Token == "" {
+		_ = ln.Close()
+		return nil, fmt.Errorf("监听 %s 为非回环地址且未配置 token（拒绝暴露未鉴权代理）", tcp)
 	}
 	s.ln = ln
 	go func() {
@@ -182,37 +188,44 @@ func (s *Server) handleConnect(ctx context.Context, cancel context.CancelFunc, c
 		upstream net.Conn
 		via      string
 		usedIP   net.IP
+		dialErr  error // 最后一次失败原因，进连接日志（排障价值，勿吞）
 	)
 	if _, accelerated := s.currentTable().Match(domain); accelerated && !s.passthrough.Load() {
 		via = "accel"
 		ips, perr := s.Dialer.Pick(ctx, domain)
-		if perr == nil {
-			var d net.Dialer
-			d.Timeout = s.dialTimeout()
-			for _, ip := range ips {
-				if ctx.Err() != nil {
-					break // 客户端已断开，停止尝试后续候选
-				}
-				conn, derr := d.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
-				if derr == nil {
-					upstream, usedIP = conn, ip
-					s.Dialer.ReportSuccess(domain, ip)
-					break
-				}
-				s.Dialer.ReportFailure(domain, ip)
+		if perr != nil {
+			dialErr = perr
+		}
+		var d net.Dialer
+		d.Timeout = s.dialTimeout()
+		for _, ip := range ips {
+			if ctx.Err() != nil {
+				break // 客户端已断开，停止尝试后续候选
 			}
+			conn, derr := d.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
+			if derr == nil {
+				upstream, usedIP = conn, ip
+				s.Dialer.ReportSuccess(domain, ip)
+				break
+			}
+			dialErr = derr
+			s.Dialer.ReportFailure(domain, ip)
 		}
 	} else {
 		via = "direct"
 		var d net.Dialer
 		d.Timeout = s.dialTimeout()
-		upstream, err = d.DialContext(ctx, "tcp", host)
+		upstream, dialErr = d.DialContext(ctx, "tcp", host)
 	}
 
 	if upstream == nil {
 		// 拨号失败不泄漏给客户端重试语义之外的细节（git/curl 收到 502 不重试 CONNECT）
+		reason := "dial failed"
+		if dialErr != nil {
+			reason = dialErr.Error()
+		}
 		_ = writeSimpleResponse(client, http.StatusBadGateway, "upstream unreachable")
-		s.record(domain, via, usedIP, start, 0, 0, false, "dial failed")
+		s.record(domain, via, usedIP, start, 0, 0, false, reason)
 		return
 	}
 	defer upstream.Close()

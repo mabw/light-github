@@ -35,21 +35,21 @@ type Options struct {
 
 // Entry 内存缓冲中的单条日志（Web UI 数据形状）。
 type Entry struct {
-	At    time.Time       `json:"at"`
-	Level string          `json:"level"`
-	Msg   string          `json:"msg"`
-	Attrs map[string]any  `json:"attrs,omitempty"`
+	At    time.Time      `json:"at"`
+	Level string         `json:"level"`
+	Msg   string         `json:"msg"`
+	Attrs map[string]any `json:"attrs,omitempty"`
 }
 
 // Manager 双 logger 管理器。
 type Manager struct {
-	app       *slog.Logger
-	conn      *slog.Logger
-	appRing   *ring
-	connRing  *ring
-	appFile   *lumberjack.Logger
-	connFile  *lumberjack.Logger
-	appLevel  *slog.LevelVar // 运行时可调（Web UI 设置热生效）
+	app      *slog.Logger
+	conn     *slog.Logger
+	appRing  *ring
+	connRing *ring
+	appFile  *lumberjack.Logger
+	connFile *lumberjack.Logger
+	appLevel *slog.LevelVar // 运行时可调（Web UI 设置热生效）
 }
 
 // New 构建日志系统（连接日志固定 INFO 级别——每条连接都是有效事件，无需级别开关）。
