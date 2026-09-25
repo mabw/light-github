@@ -77,3 +77,17 @@ func TestStore_RecordConnFeedsRateWindow(t *testing.T) {
 		t.Fatalf("RecordConn 后窗口内应有速率: %+v", snap)
 	}
 }
+
+// OnRecord 钩子：RecordConn 时同步回调（logx 落盘连接日志的挂点）
+func TestStore_OnRecordHook(t *testing.T) {
+	var got []ConnInfo
+	s := NewStore(time.Second)
+	s.OnRecord = func(i ConnInfo) { got = append(got, i) }
+
+	s.RecordConn(ConnInfo{Domain: "github.com", Via: "fixed-ip"})
+	s.RecordConn(ConnInfo{Domain: "api.github.com"})
+
+	if len(got) != 2 || got[0].Domain != "github.com" || got[1].Domain != "api.github.com" {
+		t.Fatalf("钩子应收到每条连接: %+v", got)
+	}
+}

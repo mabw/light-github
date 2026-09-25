@@ -152,3 +152,17 @@ func TestRecent_LimitAndUnknownKind(t *testing.T) {
 		t.Fatalf("未知 kind 应返回空: %+v", es)
 	}
 }
+
+// 运行时动态调级（Web UI 设置热生效路径）
+func TestSetLevel_RuntimeChange(t *testing.T) {
+	m, _ := newManager(t, Options{Level: slog.LevelInfo})
+
+	m.App().Debug("调级前不应记录")
+	m.SetLevel(slog.LevelDebug)
+	m.App().Debug("调级后应记录")
+
+	es := m.Recent(KindApp, 10)
+	if len(es) != 1 || es[0].Msg != "调级后应记录" {
+		t.Fatalf("动态调级应即时生效: %+v", es)
+	}
+}

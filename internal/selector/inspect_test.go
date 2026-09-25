@@ -78,3 +78,28 @@ func TestInspect_SkipsUnprobedAndSorts(t *testing.T) {
 		t.Fatalf("应按域名升序: %+v", infos)
 	}
 }
+
+// SetTable：规则热刷新后测速缓存失效、策略判断跟随新表（FixedIP 换为 Dynamic）
+func TestSetTable_HotSwapsStrategy(t *testing.T) {
+	res := &fakeResolver{ips: []net.IP{ip("9.9.9.9")}}
+	fixedTable := rule.NewTable([]rule.Rule{{Domain: "github.com", Kind: rule.KindFixedIP, Forward: "1.1.1.1"}})
+	sel := New(fixedTable, res, &fakeProber{}, 5*time.Minute)
+
+	ips, err := sel.Pick(context.Background(), "github.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ips[0].String() != "1.1.1.1" {
+		t.Fatalf("固定 IP 应排首位: %v", ips)
+	}
+
+	// 热更新：同域名改为 Dynamic → 缓存清空重建，不再注入固定 IP
+	sel.SetTable(rule.NewTable([]rule.Rule{{Domain: "github.com", Kind: rule.KindDynamic}}))
+	ips2, err := sel.Pick(context.Background(), "github.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ips2) != 1 || ips2[0].String() != "9.9.9.9" {
+		t.Fatalf("Dynamic 应只含 DoH 候选: %v", ips2)
+	}
+}
