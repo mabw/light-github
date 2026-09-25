@@ -194,10 +194,20 @@ type Rule struct {
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | **M0 spike** ✅ 2026-09-25 完成 | 结论见 docs/SPIKE-RESULT.md | 4 个风险点全部验证通过 |
-| **M1 核心 CLI** | proxy + selector + source + metrics，headless 运行 | `git clone` 经代理成功且快于直连；日志/统计 API 可用 |
-| **M2 Web UI** | 全部页面 + API | 浏览器完成所有管理操作 |
+| **M1 核心 CLI** ✅ 2026-09-25 完成 | proxy + selector + source + metrics，headless 运行 | `git clone` 经代理 1.49s（直连 16.8s）；`-race` 全绿 |
+| **M2 Web UI** ✅ 2026-09-25 完成 | 控制台（单文件页 + 7 端点）+ 双通道日志 + 配置持久化 | 见 §6.1；11 包 `-race` 全绿 |
 | **M3 平台层** | 托盘/自启/桌面窗口 | 三平台手工验证清单通过 |
 | **M4 发布** | goreleaser + 安装文档 | 三平台产物 + 一键接入文档 |
+
+### 6.1 M2 架构要点（2026-09-25 定稿实现）
+
+- **端口复用**：`proxy.Server.Web` 承载控制台——CONNECT 走隧道；origin-form（`GET /api/*`、`/`、`/pac`）交给 `webapi.Handler`；absolute-form（普通代理 GET）保持 400。一个端口即全部能力。
+- **双通道日志**（`internal/logx`）：运行日志（app）与连接日志（conn）各自 fan-out 到「内存环形（app 500 / conn 1000 条，供 UI 秒开）」+「JSONL 轮转文件（lumberjack 5MB×2 备份 gzip，~/.light-github/logs/）」+「终端（可选）」。级别运行时可调（`slog.LevelVar`，Web 设置页热生效）。连接日志经 `metrics.Store.OnRecord` 钩子落盘。
+- **配置持久化**（`internal/config`）：`~/.light-github/config.json`；优先级 显式 flags > 文件 > 默认值（`flag.Visit` 区分"显式设置"与"默认值"）；坏文件降级默认不阻断启动；Web 设置页部分更新（指针字段区分未提供/空值），`addr`/`token` 变更提示重启，`logLevel`/`refresh` 热生效。
+- **管理 API**（`internal/webapi`）：`GET status/stats/logs/rules/config`、`POST rules/refresh`、`POST config`、`GET /pac`；统一信封 `{success,data,error}`；Token 非空时 `/api/*` 要求 `?token=` 或 Bearer（页面 JS 透传 query token）。
+- **观测接口**：`selector.Inspect()`（各域名候选 IP/耗时/失败/沉底）、`source.Manager.Status()`（上次刷新/各源成败）；`selector.SetTable` 换表时清测速缓存（策略已变，保留 failure 记忆）。
+- **实时性**：前端 2s 轮询（速率本身是 5s 滑窗平均）；不上 WebSocket/SSE——低频观测场景轮询最简最稳，后台标签自动暂停。
+- **PAC**：按规则表生成 `shExpMatch` 脚本，白名单 `PROXY addr`，其余 `DIRECT`。
 
 ## 7. 风险与对策
 
