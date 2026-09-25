@@ -19,6 +19,7 @@ import (
 	"github.com/marvin/light-github/internal/rule"
 	"github.com/marvin/light-github/internal/selector"
 	"github.com/marvin/light-github/internal/source"
+	"github.com/marvin/light-github/internal/webui"
 )
 
 // Deps 端点依赖（cmd 组装注入；函数字段为 nil 时对应操作返回 503）。
@@ -51,7 +52,8 @@ type envelope struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// Handler 返回管理端点 mux（挂 /api/* 与 /pac）。
+// Handler 返回完整 Web 服务（/api/*、/pac 与控制台静态页）。
+// 该 handler 整体交给 proxy.Server.Web（端口复用）。
 func Handler(d *Deps) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/status", d.handleStatus)
@@ -61,6 +63,7 @@ func Handler(d *Deps) http.Handler {
 	mux.HandleFunc("/api/rules/refresh", d.handleRefresh)
 	mux.HandleFunc("/api/config", d.handleConfig)
 	mux.HandleFunc("/pac", d.handlePAC)
+	mux.Handle("/", webui.Handler()) // 兜底：控制台单页
 	return d.auth(mux)
 }
 

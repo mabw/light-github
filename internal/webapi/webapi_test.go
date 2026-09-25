@@ -273,3 +273,26 @@ func TestPAC(t *testing.T) {
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
 
 func stringReader(s string) io.Reader { return strings.NewReader(s) }
+
+// GET / 返回控制台静态页（webapi 整体作为 proxy.Web）
+func TestIndexPage(t *testing.T) {
+	srv := httptest.NewServer(Handler(newDeps(t, config.Config{})))
+	defer srv.Close()
+
+	code, _, body := getRaw(t, srv.URL+"/")
+	if code != 200 || !strings.Contains(body, "light-github 控制台") {
+		t.Fatalf("首页: %d %.80s", code, body)
+	}
+}
+
+func getRaw(t *testing.T, url string) (int, string, string) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b := make([]byte, 1<<16)
+	n, _ := resp.Body.Read(b)
+	return resp.StatusCode, "", string(b[:n])
+}
