@@ -42,6 +42,7 @@ type Server struct {
 	Metrics     *metrics.Store
 	DialTimeout time.Duration // 单候选拨号超时；零值默认 5s
 	IdleTimeout time.Duration // 隧道空闲超时（DEBT-2）；零值默认 5min
+	Token       string        // 非空时 CONNECT 必须携带 Proxy-Authorization: Bearer（DEBT-6）
 
 	mu    sync.RWMutex
 	table *rule.Table
@@ -105,6 +106,12 @@ func (s *Server) handleConn(client net.Conn) {
 	}
 	if req.Method != http.MethodConnect {
 		_ = writeSimpleResponse(client, http.StatusBadRequest, "only CONNECT supported")
+		return
+	}
+	// DEBT-6：非 loopback 监听场景的访问控制（cmd 层强制 0.0.0.0 必须配 Token）
+	if s.Token != "" && req.Header.Get("Proxy-Authorization") != "Bearer "+s.Token {
+		_, _ = fmt.Fprintf(client, "HTTP/1.1 %d %s\r\nProxy-Authenticate: Bearer\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+			http.StatusProxyAuthRequired, http.StatusText(http.StatusProxyAuthRequired))
 		return
 	}
 	s.handleConnect(ctx, cancel, client, req)

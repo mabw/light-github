@@ -266,3 +266,60 @@ func TestProxy_IdleTimeoutClosesTunnel(t *testing.T) {
 		t.Fatalf("空闲隧道应在 IdleTimeout 附近关闭，实际挂了 %v", elapsed)
 	}
 }
+
+// DEBT-6：配置 Token 后无凭据 CONNECT 返回 407，正确 Bearer 凭据放行
+func TestProxy_TokenAuth(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Connection", "close")
+		_, _ = w.Write([]byte("secured"))
+	}))
+	t.Cleanup(upstream.Close)
+	_, upPort, _ := net.SplitHostPort(upstream.Listener.Addr().String())
+
+	srv := &Server{
+		Addr:        "127.0.0.1:0",
+		Table:       rule.NewTable([]rule.Rule{{Domain: "accel.test", Kind: rule.KindDynamic}}),
+		Dialer:      &fakeDialer{ips: []net.IP{net.ParseIP("127.0.0.1")}},
+		Metrics:     metrics.NewStore(time.Second),
+		DialTimeout: 500 * time.Millisecond,
+		Token:       "s3cret-token",
+	}
+	addr, err := srv.ListenAndServe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+
+	// 无凭据 → 407
+	c, err := net.Dial("tcp", addr.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	fmt.Fprintf(c, "CONNECT accel.test:%s HTTP/1.1\r\nHost: accel.test:%s\r\n\r\n", upPort, upPort)
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil || resp.StatusCode != http.StatusProxyAuthRequired {
+		t.Fatalf("无凭据应 407: resp=%v err=%v", resp, err)
+	}
+	c.Close()
+
+	// 正确凭据 → 200 + 隧道可用
+	authed := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(&url.URL{Scheme: "http", Host: addr.String()}),
+			ProxyConnectHeader: http.Header{
+				"Proxy-Authorization": []string{"Bearer s3cret-token"},
+			},
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // 测试
+		},
+		Timeout: 5 * time.Second,
+	}
+	resp2, err := authed.Get("https://accel.test:" + upPort + "/")
+	if err != nil {
+		t.Fatalf("正确凭据应放行: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("status: %d", resp2.StatusCode)
+	}
+}

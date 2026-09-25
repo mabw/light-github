@@ -3,7 +3,7 @@
 > 用途：避免遗忘。每条含影响与建议方案；完成后移入"已清偿"并注明提交号。
 > 命名：DEBT-N；严重度：🔴 bug 级 / 🟡 功能缺陷 / 🟢 已知取舍
 
-## 未清偿
+## 已全部清偿（2026-09-25，见下方各条）
 
 ### DEBT-1 🔴 metrics 实时速率恒为 0（RateUp/RateDown 无数据来源）
 
@@ -52,9 +52,16 @@
 - **建议**：实现监听地址非 loopback 时强制 Token（配置项 + 401 拒绝无凭据请求）；Web UI 显示安全状态。
 - **目标**：M3（多平台分发前必须）。
 
-## 已清偿
+## 清偿记录
 
-（暂无）
+| 债务 | 提交 | 验证 |
+|---|---|---|
+| DEBT-1 速率恒0 | fix: DEBT-1 RecordConn 喂入速率窗口 | 新增用例 TestStore_RecordConnFeedsRateWindow，metrics 98% |
+| DEBT-2 隧道泄漏 | fix: DEBT-2/5 隧道空闲watchdog双向关闭+连接级ctx传播 | TestProxy_IdleTimeoutClosesTunnel（挂起上游 150ms 关闭），proxy 91% |
+| DEBT-5 ctx 不传播 | 同上 | 拨号改 DialContext + 候选间检查取消 |
+| DEBT-3 冷启动慢 | fix: DEBT-3/4 selector 分片锁+Preload 后台预热 | TestSelector_PreloadFillsCache + cmd 启动预热接入 |
+| DEBT-4 全局锁 | 同上 | TestPick_DifferentDomainsDoNotBlockEachOther（真阻塞探针：fast 31ms vs slow 300ms），selector 93.7% |
+| DEBT-6 0.0.0.0 无鉴权 | fix: DEBT-6 cmd 强制校验 + proxy 407 | TestValidateListen 6 用例 + TestProxy_TokenAuth + 实测拒绝启动 |
 
 ---
 

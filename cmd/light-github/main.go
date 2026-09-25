@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -36,12 +37,16 @@ func main() {
 	var (
 		addr        = flag.String("addr", defaultAddr, "监听地址（WSL 场景可改 0.0.0.0）")
 		refresh     = flag.Duration("refresh", defaultRefresh, "数据源刷新周期")
+		token       = flag.String("token", "", "CONNECT 访问令牌（非 loopback 监听时必填，DEBT-6）")
 		showVersion = flag.Bool("version", false, "打印版本")
 	)
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("light-github 0.1.0 (M1)")
 		return
+	}
+	if err := validateListen(*addr, *token); err != nil {
+		log.Fatalf("监听配置不安全: %v（WSL/局域网场景请加 -token <随机串>）", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -85,6 +90,7 @@ func main() {
 		Table:   table,
 		Dialer:  sel,
 		Metrics: store,
+		Token:   *token,
 	}
 	listenAddr, err := srv.ListenAndServe(ctx)
 	if err != nil {
@@ -122,6 +128,25 @@ func main() {
 	log.Printf("本次会话: 连接 %d（失败 %d）↑%s ↓%s",
 		snap.TotalConns, snap.FailedConns,
 		humanBytes(snap.TotalUp), humanBytes(snap.TotalDown))
+}
+
+// validateListen 非 loopback 监听必须配置 Token（DEBT-6：0.0.0.0 会把未鉴权代理暴露给局域网）
+func validateListen(addr, token string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("地址格式错误: %w", err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		if host == "localhost" {
+			return nil
+		}
+		return nil // 自定义主机名场景放行（绑定本机网卡名等），风险提示已覆盖 0.0.0.0
+	}
+	if !ip.IsLoopback() && token == "" {
+		return fmt.Errorf("-addr %s 为非回环地址", addr)
+	}
+	return nil
 }
 
 // printOnboarding 打印接入命令（不替用户执行任何系统修改）
