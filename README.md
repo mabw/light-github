@@ -5,6 +5,7 @@
 ## 特性
 
 - **CONNECT 隧道加速**：白名单域名（GitHub / Docker Hub / HuggingFace）经本地代理选路，其余域名原样直通——开了等于没开
+- **菜单栏/托盘常驻**（默认，octocat 图标）：加速、系统代理（PAC）、开机自启三个开关 + 打开控制台 + 退出；退出自动还原系统代理。`-no-tray` 可无 GUI 运行
 - **Web 控制台**（`http://127.0.0.1:12800`，与代理同端口）：实时速率/流量统计、连接日志、运行日志（全部 ↔ 仅连接切换）、规则与测速明细、接入指引、设置热生效
 - **双通道持久日志**：运行日志 + 连接日志分别落盘 `~/.light-github/logs/`（JSONL，自动轮转 5MB×2 备份 gzip，磁盘占用有硬上限），排错不抓瞎
 - **配置文件**：`~/.light-github/config.json`（命令行参数 > 文件 > 默认值），Web 设置页可直接修改
@@ -21,8 +22,10 @@ go build -o light-github ./cmd/light-github && ./light-github
 go run ./cmd/light-github
 ```
 
-启动后打开 <http://127.0.0.1:12800> 即控制台（仪表盘/日志/规则/设置）。
-常用参数：`-addr`（监听地址）、`-token`（非回环监听必填）、`-v`（调试日志）、`-refresh`（规则刷新周期）。
+启动后打开 <http://127.0.0.1:12800> 即控制台（仪表盘/日志/规则/设置），同时菜单栏出现托盘图标。
+常用参数：`-addr`（监听地址）、`-token`（非回环监听必填）、`-v`（调试日志）、`-refresh`（规则刷新周期）、`-no-tray`（无托盘 headless）。
+
+**开机自启**：托盘菜单或直接生成 `~/Library/LaunchAgents/com.marvin.light-github.plist`（Windows: HKCU Run；Linux: `~/.config/autostart/`），下次登录生效。
 
 启动后监听 `127.0.0.1:12800`，按需接入：
 
@@ -67,11 +70,13 @@ git / 浏览器 / curl（CONNECT 127.0.0.1:12800）
 go test -race -cover ./...   # 全部包测试（当前覆盖率 85%+）
 ```
 
-里程碑：M0 spike ✅ → **M1 核心 CLI ✅** → M2 Web 管理 UI → M3 托盘/自启/桌面窗口 → M4 三平台打包分发
+里程碑：M0 spike ✅ → M1 核心 CLI ✅ → M2 Web 管理 UI ✅ → **M3 托盘/自启 ✅（macOS 实测，Windows/Linux 见 DEBT-8）** → M4 三平台打包分发
 
 ## 致谢（Acknowledgments）
 
 本项目的实现大量借鉴了以下开源项目，在此致谢（按贡献维度排列；本项目为独立 Go 实现，未直接复制其代码）：
+
+- **[GitHub Octicons](https://github.com/primer/octicons)**：托盘图标使用其 mark-github（octocat 剪影）。
 
 - **[Watt Toolkit / Steam++](https://github.com/BeyondDimension/SteamTools)**（原 [FastGithub](https://github.com/dotnetcore/FastGithub) 的继承者）
   逐 IP 容错的候选链设计、FlowAnalyzer 滑动窗口速率统计思路、防解析回环与 CNAME 转发通道（`ForwardDomainNames`）的领域知识，以及本 README 所述公开加速配置 API 的数据格式。感谢 rmbgame 团队持续维护加速配置服务。
