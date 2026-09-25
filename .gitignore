@@ -1,0 +1,7 @@
+# 二进制
+spike/*/spike-*
+*.exe
+# 运行时产物
+*.cache.json
+*.log
+.DS_Store
