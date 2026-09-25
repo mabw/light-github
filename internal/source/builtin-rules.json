@@ -1,0 +1,26 @@
+{
+  "_comment": "内置兜底清单（三源全失效时的保命内核）。域名集转译自 GitHub520 清单 + steampp Docker Hub 配置 + HuggingFace 常用域，策略全部 Dynamic（DoH+测速）。",
+  "rules": [
+    { "domain": "github.com", "kind": "Dynamic" },
+    { "domain": "*.github.com", "kind": "Dynamic" },
+    { "domain": "*.githubusercontent.com", "kind": "Dynamic" },
+    { "domain": "github.io", "kind": "Dynamic" },
+    { "domain": "*.github.io", "kind": "Dynamic" },
+    { "domain": "githubassets.com", "kind": "Dynamic" },
+    { "domain": "*.githubassets.com", "kind": "Dynamic" },
+    { "domain": "githubapp.com", "kind": "Dynamic" },
+    { "domain": "github.dev", "kind": "Dynamic" },
+    { "domain": "githubstatus.com", "kind": "Dynamic" },
+    { "domain": "hub.docker.com", "kind": "Dynamic" },
+    { "domain": "registry-1.docker.io", "kind": "Dynamic" },
+    { "domain": "auth.docker.io", "kind": "Dynamic" },
+    { "domain": "index.docker.io", "kind": "Dynamic" },
+    { "domain": "production.cloudflare.docker.com", "kind": "Dynamic" },
+    { "domain": "*.docker.io", "kind": "Dynamic" },
+    { "domain": "huggingface.co", "kind": "Dynamic" },
+    { "domain": "cdn-lfs.huggingface.co", "kind": "Dynamic" },
+    { "domain": "cdn-lfs-us-1.huggingface.co", "kind": "Dynamic" },
+    { "domain": "cas-bridge.xethub.hf.co", "kind": "Dynamic" },
+    { "domain": "*.hf.co", "kind": "Dynamic" }
+  ]
+}
