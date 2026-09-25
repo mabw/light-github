@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -321,5 +322,87 @@ func TestProxy_TokenAuth(t *testing.T) {
 	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusOK {
 		t.Fatalf("status: %d", resp2.StatusCode)
+	}
+}
+
+// ---- M2-5：端口复用（非 CONNECT 的 origin-form 请求交给 Web 处理器） ----
+
+// GET /api/x 经代理端口应到达 Web handler（含响应头透传）
+func TestProxy_WebRoutesOriginForm(t *testing.T) {
+	web := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	srv := &Server{
+		Addr:  "127.0.0.1:0",
+		Table: rule.NewTable(nil),
+		Web:   web,
+	}
+	addr, err := srv.ListenAndServe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+
+	resp, err := http.Get("http://" + addr.String() + "/api/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || !strings.Contains(string(b), `"ok":true`) {
+		t.Fatalf("web 路由失败: %d %s", resp.StatusCode, b)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("响应头应透传: %q", ct)
+	}
+}
+
+// absolute-form 的普通代理请求（GET http://example.com/）仍拒绝，不进 Web
+func TestProxy_WebDoesNotServeAbsoluteForm(t *testing.T) {
+	srv := &Server{
+		Addr:  "127.0.0.1:0",
+		Table: rule.NewTable(nil),
+		Web:   http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("web")) }),
+	}
+	addr, err := srv.ListenAndServe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+
+	// 原始 TCP 模拟正向代理形态请求（absolute-form）
+	c, err := net.Dial("tcp", addr.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	fmt.Fprintf(c, "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("absolute-form 应 400: %d", resp.StatusCode)
+	}
+}
+
+// Web 为 nil 时保持旧行为（400）
+func TestProxy_NilWebStill400(t *testing.T) {
+	srv := &Server{Addr: "127.0.0.1:0", Table: rule.NewTable(nil)}
+	addr, err := srv.ListenAndServe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+
+	resp, err := http.Get("http://" + addr.String() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("nil Web 应保持 400: %d", resp.StatusCode)
 	}
 }
