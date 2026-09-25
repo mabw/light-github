@@ -1,8 +1,9 @@
-// light-github 主入口（M2：headless 核心服务 + Web 控制台）。
+// light-github 主入口（M3：核心服务 + Web 控制台 + 托盘常驻）。
 //
 // 组装链：数据源（steampp→GitHub520→内置）→ 规则表 → 选择器（DoH+TCP测速）
 //
 //	→ CONNECT 隧道代理（与控制台共用端口）→ 指标/日志
+//	→ 托盘（默认）/-no-tray headless；两种模式共享同一退出清理路径
 package main
 
 import (
@@ -12,14 +13,17 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/marvin/light-github/internal/autostart"
 	"github.com/marvin/light-github/internal/config"
 	"github.com/marvin/light-github/internal/doh"
 	"github.com/marvin/light-github/internal/logx"
@@ -29,11 +33,12 @@ import (
 	"github.com/marvin/light-github/internal/selector"
 	"github.com/marvin/light-github/internal/source"
 	"github.com/marvin/light-github/internal/sysproxy"
+	"github.com/marvin/light-github/internal/tray"
 	"github.com/marvin/light-github/internal/webapi"
 )
 
 const (
-	version         = "0.2.0"
+	version         = "0.3.0"
 	steamppAPI      = "https://api.steampp.net/accelerator/projectgroups"
 	github520HostsJSON = "https://raw.hellogithub.com/hosts.json"
 )
@@ -43,12 +48,13 @@ func main() {
 		addrFlag    = flag.String("addr", config.DefaultAddr, "监听地址（WSL 场景可改 0.0.0.0）")
 		refreshFlag = flag.Duration("refresh", config.DefaultRefresh, "数据源刷新周期")
 		tokenFlag   = flag.String("token", "", "访问令牌（非 loopback 监听时必填）")
+		noTray      = flag.Bool("no-tray", false, "无托盘运行（headless/服务器场景）")
 		verbose     = flag.Bool("v", false, "调试日志（等价 logLevel=debug，优先级高于配置文件）")
 		showVersion = flag.Bool("version", false, "打印版本")
 	)
 	flag.Parse()
 	if *showVersion {
-		fmt.Println("light-github " + version + " (M2)")
+		fmt.Println("light-github " + version + " (M3)")
 		return
 	}
 
@@ -147,6 +153,50 @@ func main() {
 	// 系统代理一键接入用的 PAC 地址（0.0.0.0 对本机浏览器无意义，归一为回环）
 	pacURL := "http://" + loopbackAddr(cfg.Addr) + "/pac"
 
+	// ---- 平台动作（Web 控制台与托盘共用同一入口，状态天然一致）----
+	exePath, exeErr := os.Executable()
+
+	setAccel := func(on bool) {
+		srv.SetEnabled(on)
+		if on {
+			log.Info("加速已开启")
+		} else {
+			log.Warn("加速已关闭（全部直通；端口与观测保持可用）")
+		}
+	}
+	setSysProxy := func(on bool) error {
+		if on {
+			if err := sysproxy.Enable(pacURL); err != nil {
+				log.Warn("系统代理接入失败", "err", err)
+				return err
+			}
+			log.Info("系统代理已接入（PAC）", "url", pacURL, "note", "与其他代理软件的系统代理互斥")
+		} else {
+			if err := sysproxy.Disable(); err != nil {
+				return err
+			}
+			log.Info("系统代理已还原")
+		}
+		return nil
+	}
+	toggleAutostart := func(on bool) error {
+		if exeErr != nil {
+			return fmt.Errorf("定位可执行文件失败: %w", exeErr)
+		}
+		if on {
+			if err := autostart.Enable(exePath); err != nil {
+				return err
+			}
+			log.Info("开机自启已开启", "path", exePath)
+		} else {
+			if err := autostart.Disable(); err != nil {
+				return err
+			}
+			log.Info("开机自启已关闭")
+		}
+		return nil
+	}
+
 	deps := &webapi.Deps{
 		Version:   version,
 		StartedAt: time.Now(),
@@ -178,30 +228,9 @@ func main() {
 			applyRules(newRules)
 			return len(newRules), nil
 		},
-		SetAccel: func(on bool) {
-			srv.SetEnabled(on)
-			if on {
-				log.Info("加速已开启")
-			} else {
-				log.Warn("加速已关闭（全部直通；端口与观测保持可用）")
-			}
-		},
+		SetAccel:     setAccel,
 		AccelEnabled: func() bool { return srv.Enabled() },
-		SetSysProxy: func(on bool) error {
-			if on {
-				if err := sysproxy.Enable(pacURL); err != nil {
-					log.Warn("系统代理接入失败", "err", err)
-					return err
-				}
-				log.Info("系统代理已接入（PAC）", "url", pacURL, "note", "与其他代理软件的系统代理互斥")
-			} else {
-				if err := sysproxy.Disable(); err != nil {
-					return err
-				}
-				log.Info("系统代理已还原")
-			}
-			return nil
-		},
+		SetSysProxy:  setSysProxy,
 		SysProxyState: func() bool { return sysproxy.Enabled(pacURL) },
 	}
 
@@ -216,7 +245,8 @@ func main() {
 	}
 	listenAddr, err := srv.ListenAndServe(ctx)
 	if err != nil {
-		log.Error("监听失败", "err", err, "addr", cfg.Addr)
+		log.Error("监听失败", "err", err, "addr", cfg.Addr,
+			"hint", "端口被占用通常意味着已有一个实例在运行")
 		os.Exit(1)
 	}
 	log.Info("light-github 已启动",
@@ -247,7 +277,28 @@ func main() {
 		}
 	}()
 
-	<-ctx.Done()
+	// 常驻形态：托盘（默认，主线程 Cocoa 循环）或 headless 等信号。
+	// 两路退出（托盘 Quit / OS 信号）都走 cancel → 下方统一清理。
+	if *noTray {
+		<-ctx.Done()
+	} else {
+		uiURL := "http://" + loopbackAddr(listenAddr.String())
+		if err := tray.Run(ctx, tray.Deps{
+			Version:         version,
+			UIURL:           uiURL,
+			OpenUI:          func() { openBrowser(uiURL) },
+			Quit:            stop,
+			ToggleAccel:     setAccel,
+			AccelState:      func() bool { return srv.Enabled() },
+			ToggleSysProxy:  setSysProxy,
+			SysProxyState:   func() bool { return sysproxy.Enabled(pacURL) },
+			ToggleAutostart: toggleAutostart,
+			AutostartState:  autostart.Enabled,
+		}); err != nil {
+			log.Warn("托盘不可用，回退 headless 运行", "err", err)
+			<-ctx.Done()
+		}
+	}
 	log.Info("正在退出…")
 	_ = srv.Close()
 
@@ -343,4 +394,20 @@ func loopbackAddr(addr string) string {
 		return net.JoinHostPort("127.0.0.1", port)
 	}
 	return addr
+}
+
+// openBrowser 跨平台用系统默认浏览器打开（托盘「打开控制台」；spike-d 验证过的命令）
+func openBrowser(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url) //nolint:gosec // url 为程序内构造的本机地址
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "打开浏览器失败: %v（控制台地址 %s）\n", err, url)
+	}
 }
