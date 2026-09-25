@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -104,5 +105,36 @@ func TestPath(t *testing.T) {
 
 	if p := Path(); p != filepath.Join(home, ".light-github", "config.json") {
 		t.Fatalf("路径应为 ~/.light-github/config.json: %s", p)
+	}
+}
+
+// Refresh 序列化为人类可读时长字符串（"1h0m0s"），而非裸纳秒整数
+func TestRefresh_MarshalAsString(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Save(path, Config{Addr: "a", Refresh: time.Hour, LogLevel: "info"}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	if !strings.Contains(string(b), `"refresh": "1h0m0s"`) {
+		t.Fatalf("refresh 应为字符串时长: %s", b)
+	}
+}
+
+// Load 兼容旧格式（裸纳秒数字）与新格式（字符串时长）
+func TestRefresh_UnmarshalCompat(t *testing.T) {
+	dir := t.TempDir()
+
+	old := filepath.Join(dir, "old.json")
+	_ = os.WriteFile(old, []byte(`{"addr":"a","refresh":3600000000000,"logLevel":"info"}`), 0o600)
+	cfg, err := Load(old)
+	if err != nil || cfg.Refresh != time.Hour {
+		t.Fatalf("旧纳秒格式应兼容: %+v err=%v", cfg, err)
+	}
+
+	newF := filepath.Join(dir, "new.json")
+	_ = os.WriteFile(newF, []byte(`{"addr":"a","refresh":"30m","logLevel":"info"}`), 0o600)
+	cfg2, err := Load(newF)
+	if err != nil || cfg2.Refresh != 30*time.Minute {
+		t.Fatalf("字符串格式应支持: %+v err=%v", cfg2, err)
 	}
 }

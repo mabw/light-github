@@ -61,6 +61,7 @@ func Handler(d *Deps) http.Handler {
 	mux.HandleFunc("/api/logs", d.handleLogs)
 	mux.HandleFunc("/api/rules", d.handleRules)
 	mux.HandleFunc("/api/rules/refresh", d.handleRefresh)
+	mux.HandleFunc("/api/rules/probe", d.handleProbe)
 	mux.HandleFunc("/api/config", d.handleConfig)
 	mux.HandleFunc("/pac", d.handlePAC)
 	mux.Handle("/", webui.Handler()) // 兜底：控制台单页
@@ -200,6 +201,36 @@ func (d Deps) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, envelope{Success: true, Data: map[string]any{"count": count}})
+}
+
+// handleProbe 单域名强制重测（忽略测速缓存；规则页行内测速按钮）。
+func (d Deps) handleProbe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, envelope{Error: "method"})
+		return
+	}
+	domain := r.URL.Query().Get("domain")
+	if domain == "" {
+		writeJSON(w, http.StatusBadRequest, envelope{Error: "缺少 domain 参数"})
+		return
+	}
+	if _, err := d.Selector.Reprobe(r.Context(), domain); err != nil {
+		writeJSON(w, http.StatusOK, envelope{Success: false, Error: err.Error()})
+		return
+	}
+	// 从 Inspect 快照中取该域名的最新状态（成功后必存在）
+	var info *selector.DomainInfo
+	for _, di := range d.Selector.Inspect() {
+		if di.Domain == domain {
+			info = &di
+			break
+		}
+	}
+	if info == nil {
+		writeJSON(w, http.StatusOK, envelope{Success: false, Error: "测速完成但未找到结果"})
+		return
+	}
+	writeJSON(w, http.StatusOK, envelope{Success: true, Data: info})
 }
 
 func (d Deps) handleConfig(w http.ResponseWriter, r *http.Request) {

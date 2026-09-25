@@ -103,3 +103,34 @@ func TestSetTable_HotSwapsStrategy(t *testing.T) {
 		t.Fatalf("Dynamic 应只含 DoH 候选: %v", ips2)
 	}
 }
+
+// Reprobe：TTL 缓存命中时不重测，Reprobe 强制重测（Web UI 手动测速按钮）
+func TestReprobe_ForcesRetestIgnoringCache(t *testing.T) {
+	prober := &fakeProber{}
+	sel := New(
+		rule.NewTable([]rule.Rule{{Domain: "github.com", Kind: rule.KindFixedIP, Forward: "1.1.1.1"}}),
+		&fakeResolver{ips: []net.IP{ip("9.9.9.9")}},
+		prober, 5*time.Minute,
+	)
+
+	if _, err := sel.Pick(context.Background(), "github.com"); err != nil {
+		t.Fatal(err)
+	}
+	afterFirst := prober.calls.Load()
+
+	// TTL 内再次 Pick：命中缓存，不重测
+	if _, err := sel.Pick(context.Background(), "github.com"); err != nil {
+		t.Fatal(err)
+	}
+	if got := prober.calls.Load(); got != afterFirst {
+		t.Fatalf("缓存命中不应重测: %d → %d", afterFirst, got)
+	}
+
+	// Reprobe：强制重测
+	if _, err := sel.Reprobe(context.Background(), "github.com"); err != nil {
+		t.Fatal(err)
+	}
+	if got := prober.calls.Load(); got <= afterFirst {
+		t.Fatalf("Reprobe 应强制重测: %d → %d", afterFirst, got)
+	}
+}

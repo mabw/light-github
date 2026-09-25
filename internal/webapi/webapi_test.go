@@ -296,3 +296,35 @@ func getRaw(t *testing.T, url string) (int, string, string) {
 	n, _ := resp.Body.Read(b)
 	return resp.StatusCode, "", string(b[:n])
 }
+
+// 单域名手动测速：强制重测并返回该域名最新状态
+func TestProbeDomain(t *testing.T) {
+	srv := httptest.NewServer(Handler(newDeps(t, config.Config{})))
+	defer srv.Close()
+
+	// 缺 domain → 400
+	resp, _ := http.Post(srv.URL+"/api/rules/probe", "application/json", nil)
+	resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Fatalf("缺 domain 应 400: %d", resp.StatusCode)
+	}
+
+	// 正常重测 → 返回该域名候选
+	resp2, err := http.Post(srv.URL+"/api/rules/probe?domain=github.com", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	var body map[string]any
+	_ = json.NewDecoder(resp2.Body).Decode(&body)
+	if resp2.StatusCode != 200 || body["success"] != true {
+		t.Fatalf("probe: %d %v", resp2.StatusCode, body)
+	}
+	d := body["data"].(map[string]any)
+	if d["domain"] != "github.com" {
+		t.Fatalf("data.domain: %v", d)
+	}
+	if cands := d["candidates"].([]any); len(cands) == 0 {
+		t.Fatal("应返回候选列表")
+	}
+}

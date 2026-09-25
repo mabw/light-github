@@ -72,6 +72,14 @@ tr:hover td{background:color-mix(in oklch,var(--surface-2) 55%,transparent)}
 .tag.fail{color:var(--err);border-color:color-mix(in oklch,var(--err) 40%,transparent)}
 .tag.sunk{color:var(--warn);border-color:color-mix(in oklch,var(--warn) 45%,transparent)}
 
+/* 规则明细行 */
+tr.subrow td{background:var(--surface);white-space:normal;font-family:var(--mono);font-size:.74rem;color:var(--muted);padding:.4rem .7rem .6rem 2.2rem}
+.cand{display:inline-block;margin:.15rem .6rem .15rem 0;padding:.1rem .5rem;border:1px solid var(--line);border-radius:5px}
+.cand.best{border-color:var(--accent);color:var(--accent)}
+.domcell{cursor:pointer}
+.domcell:hover{color:var(--accent)}
+th.act,td.act{text-align:right}
+
 /* ---- 过滤器 / 表单 ---- */
 .toolbar{display:flex;gap:.5rem;align-items:center;margin-bottom:.8rem;flex-wrap:wrap}
 .toolbar .spacer{flex:1}
@@ -190,12 +198,16 @@ details[open] summary::before{transform:rotate(90deg)}
 <!-- 规则与测速 -->
 <section id="tab-rules">
   <div class="toolbar">
+    <input id="rules-filter" placeholder="过滤域名…" style="width:180px">
     <button class="btn" id="rules-refresh">刷新</button>
     <button class="btn" id="rules-sel-refresh">立即刷新规则源</button>
     <span class="spacer"></span>
     <span class="hint" id="rules-count"></span>
   </div>
-  <div id="rules-list"></div>
+  <div class="scroll"><table>
+    <thead><tr><th>域名</th><th>类型</th><th>最优出口</th><th>候选</th><th>状态</th><th class="act">测速</th></tr></thead>
+    <tbody id="rules-body"></tbody>
+  </table></div>
 </section>
 
 <!-- 接入指引 -->
@@ -269,13 +281,21 @@ const fmtT = s => {
   return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
 };
 
-/* ---- Tab 切换 ---- */
+/* ---- Tab 切换（切换时立即拉一次该页最新数据，不等下一个轮询周期） ---- */
 $("#nav").addEventListener("click", e => {
   const btn = e.target.closest("button[data-tab]");
   if (!btn) return;
   document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b === btn));
   document.querySelectorAll("main section").forEach(s =>
     s.classList.toggle("active", s.id === "tab-" + btn.dataset.tab));
+  switch (btn.dataset.tab) {
+    case "dash": pollStats(); pollStatus(); break;
+    case "conns": pollConns(); break;
+    case "logs": loadLogs(); break;
+    case "rules": loadRules(); break;
+    case "guide": renderGuide(); break;
+    case "settings": loadConfig(); break;
+  }
 });
 
 /* ---- 仪表盘 ---- */
@@ -391,23 +411,86 @@ $("#log-refresh").addEventListener("click", loadLogs);
 $("#conn-refresh").addEventListener("click", pollConns);
 
 /* ---- 规则与测速 ---- */
+const rulesState = { inspect: new Map(), expanded: new Set(), all: [] };
+
+// 与 selector 排序一致：先沉底等级后耗时
+function bestCand(cands) {
+  if (!cands || !cands.length) return null;
+  return [...cands].sort((a, b) => (a.sunk - b.sunk) || (a.costMs - b.costMs))[0];
+}
+
+function renderRules() {
+  const q = $("#rules-filter").value.trim().toLowerCase();
+  const rules = rulesState.all.filter(r => {
+    const d = (r.Domain || r.domain).toLowerCase();
+    return !q || d.includes(q);
+  });
+  $("#rules-count").textContent = `共 ${rulesState.all.length} 条规则 · ${rulesState.inspect.size} 个域名已测速`;
+  $("#rules-body").innerHTML = rules.map(r => {
+    const dom = r.Domain || r.domain, kind = r.Kind || r.kind;
+    const probeDom = dom.replace(/^\*\./, "");
+    const ins = rulesState.inspect.get(probeDom);
+    const cands = ins ? ins.candidates || [] : [];
+    const best = bestCand(cands);
+    const sunk = cands.filter(c => c.sunk).length;
+    const open = rulesState.expanded.has(dom);
+
+    const main = `<tr data-dom="${esc(dom)}">
+      <td class="domcell">${esc(dom)}</td>
+      <td><span class="tag">${kind}</span></td>
+      <td>${best ? `${esc(best.ip)} <span style="color:var(--muted)">· ${best.costMs}ms</span>` : '<span style="color:var(--muted)">未测速</span>'}</td>
+      <td>${cands.length || "—"}</td>
+      <td>${!ins ? '<span class="tag">未测速</span>'
+           : sunk ? `<span class="tag sunk">${sunk} 沉底</span>`
+           : '<span class="tag ok">正常</span>'}</td>
+      <td class="act"><button class="btn probe" data-dom="${esc(probeDom)}">测速</button></td>
+    </tr>`;
+
+    const detail = `<tr class="subrow" ${open ? "" : "hidden"}><td colspan="6">${
+      (r.Forward || r.forward) ? `forward: ${esc(r.Forward || r.forward)}<br>` : ""
+    }${cands.length
+        ? [...cands].sort((a, b) => (a.sunk - b.sunk) || (a.costMs - b.costMs))
+            .map(c => `<span class="cand${c === best ? " best" : ""}">${c.ip} · ${c.costMs}ms${c.sunk ? " · 沉底" : ""}${c.failure > 0 && !c.sunk ? ` · 失败${c.failure}` : ""}</span>`).join("")
+        : "未测速（点右侧按钮立即测速）"}</td></tr>`;
+    return main + detail;
+  }).join("") || '<tr><td colspan="6" class="empty">无匹配规则</td></tr>';
+}
+
 async function loadRules() {
   const body = await api("/api/rules").catch(() => null);
   if (!body || !body.success) return;
   const d = body.data;
-  const inspect = new Map((d.domains || []).map(x => [x.domain, x]));
-  $("#rules-count").textContent = `共 ${d.rules.length} 条规则 · ${(d.domains || []).length} 个域名已测速`;
-  $("#rules-list").innerHTML = (d.rules || []).map(r => {
-    const ins = inspect.get(r.Domain || r.domain);
-    const cands = ins ? (ins.candidates || []).map(c =>
-      `<div>${c.ip} · ${c.costMs}ms ${c.sunk ? '<span class="tag sunk">沉底</span>' : ""}
-        ${c.failure > 0 && !c.sunk ? `<span class="tag">失败${c.failure}</span>` : ""}</div>`).join("")
-      : '<div style="color:var(--muted)">未测速（等待首次使用或预热）</div>';
-    return `<details><summary>${r.Domain || r.domain} <span class="tag">${r.Kind || r.kind}</span></summary>
-      <div class="cands">${r.Forward && r.Forward !== "" ? "forward: " + (r.Forward || r.forward) + "<br>" : ""}${cands}</div>
-    </details>`;
-  }).join("");
+  rulesState.all = d.rules || [];
+  rulesState.inspect = new Map((d.domains || []).map(x => [x.domain, x]));
+  renderRules();
 }
+
+// 域名单元格 toggle 明细行 / 测速按钮（事件委托）
+$("#rules-body").addEventListener("click", async e => {
+  const probeBtn = e.target.closest("button.probe");
+  if (probeBtn) {
+    probeBtn.disabled = true;
+    probeBtn.textContent = "测速中…";
+    const resp = await api(`/api/rules/probe?domain=${encodeURIComponent(probeBtn.dataset.dom)}`, { method: "POST" }).catch(() => null);
+    if (resp && resp.success) {
+      rulesState.inspect.set(resp.data.domain, resp.data);
+    } else {
+      probeBtn.textContent = "失败";
+      setTimeout(() => { probeBtn.textContent = "测速"; }, 1500);
+      return;
+    }
+    renderRules();
+    return;
+  }
+  const cell = e.target.closest("td.domcell");
+  if (cell) {
+    const dom = cell.parentElement.dataset.dom;
+    const row = cell.parentElement.nextElementSibling;
+    rulesState.expanded.has(dom) ? rulesState.expanded.delete(dom) : rulesState.expanded.add(dom);
+    row.hidden = !row.hidden;
+  }
+});
+$("#rules-filter").addEventListener("input", renderRules);
 $("#rules-refresh").addEventListener("click", loadRules);
 $("#rules-sel-refresh").addEventListener("click", async e => {
   e.target.disabled = true;

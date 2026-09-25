@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -32,6 +33,51 @@ func defaults() Config {
 		Refresh:  DefaultRefresh,
 		LogLevel: DefaultLogLevel,
 	}
+}
+
+// MarshalJSON 将 Refresh 输出为人类可读时长（"1h0m0s"）而非裸纳秒整数
+// （Web 设置页与配置文件双受益）。
+func (c Config) MarshalJSON() ([]byte, error) {
+	type plain struct {
+		Addr     string `json:"addr"`
+		Token    string `json:"token,omitempty"`
+		Refresh  string `json:"refresh"`
+		LogLevel string `json:"logLevel"`
+	}
+	return json.Marshal(plain{Addr: c.Addr, Token: c.Token, Refresh: c.Refresh.String(), LogLevel: c.LogLevel})
+}
+
+// UnmarshalJSON 兼容两种形态：字符串时长（"30m"，新格式）与纳秒数字（旧格式）。
+func (c *Config) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		Addr     string          `json:"addr"`
+		Token    string          `json:"token"`
+		Refresh  json.RawMessage `json:"refresh"`
+		LogLevel string          `json:"logLevel"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	c.Addr, c.Token, c.LogLevel = raw.Addr, raw.Token, raw.LogLevel
+
+	s := strings.TrimSpace(string(raw.Refresh))
+	switch {
+	case s == "" || s == "null":
+		c.Refresh = 0
+	case s[0] == '"': // "30m"
+		d, err := time.ParseDuration(strings.Trim(s, `"`))
+		if err != nil {
+			return err
+		}
+		c.Refresh = d
+	default: // 3600000000000（纳秒）
+		var ns int64
+		if err := json.Unmarshal(raw.Refresh, &ns); err != nil {
+			return err
+		}
+		c.Refresh = time.Duration(ns)
+	}
+	return nil
 }
 
 // Path 返回配置文件路径（~/.light-github/config.json）。

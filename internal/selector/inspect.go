@@ -2,6 +2,8 @@
 package selector
 
 import (
+	"context"
+	"net"
 	"sort"
 	"time"
 )
@@ -19,6 +21,15 @@ type DomainInfo struct {
 	Domain     string          `json:"domain"`
 	ProbedAt   time.Time       `json:"probedAt"`
 	Candidates []CandidateInfo `json:"candidates"`
+}
+
+// Reprobe 强制对单域名重新测速（忽略 TTL 缓存；Web UI 手动测速按钮）。
+func (s *Selector) Reprobe(ctx context.Context, domain string) ([]net.IP, error) {
+	st := s.stateFor(domain)
+	st.mu.Lock()
+	st.probedAt = time.Time{} // 使 Pick 视为过期重建
+	st.mu.Unlock()
+	return s.Pick(ctx, domain)
 }
 
 // Inspect 返回全部已探测域名的状态快照（按域名升序，UI 稳定展示）。
