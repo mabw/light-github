@@ -224,7 +224,10 @@ func TestConfig_GetAndPost(t *testing.T) {
 	}
 
 	// 非法 body → 400
-	resp2, _ := http.Post(srv.URL+"/api/config", "application/json", stringReader(`{bad`))
+	resp2, err := http.Post(srv.URL+"/api/config", "application/json", stringReader(`{bad`))
+	if err != nil {
+		t.Fatalf("POST bad body: %v", err)
+	}
 	defer resp2.Body.Close()
 	if resp2.StatusCode != 400 {
 		t.Fatalf("坏 body 应 400: %d", resp2.StatusCode)
