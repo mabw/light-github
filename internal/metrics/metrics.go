@@ -66,7 +66,8 @@ func (s *Store) Add(up, down int64) {
 	s.trimLocked()
 }
 
-// RecordConn 记录一条连接（同时累计其流量）。
+// RecordConn 记录一条连接（同时累计其流量并喂入速率窗口——DEBT-1：
+// proxy 只调用本方法，不喂窗口会导致实时速率恒为 0）。
 func (s *Store) RecordConn(info ConnInfo) {
 	info.At = time.Now()
 	s.mu.Lock()
@@ -76,6 +77,10 @@ func (s *Store) RecordConn(info ConnInfo) {
 	s.conns++
 	if !info.OK {
 		s.failed++
+	}
+	if info.Up > 0 || info.Down > 0 {
+		s.samples = append(s.samples, sample{at: info.At, up: info.Up, dn: info.Down})
+		s.trimLocked()
 	}
 	s.connLog = append([]ConnInfo{info}, s.connLog...)
 	if len(s.connLog) > s.logMax {

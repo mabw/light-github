@@ -65,3 +65,15 @@ func TestStore_Connections(t *testing.T) {
 		t.Fatalf("连接统计错误: %+v", snap)
 	}
 }
+
+// DEBT-1：RecordConn 也必须产生速率样本（proxy 只调 RecordConn 不调 Add，
+// 否则 Web UI 的实时速率恒为 0）
+func TestStore_RecordConnFeedsRateWindow(t *testing.T) {
+	s := NewStore(time.Second)
+	s.RecordConn(ConnInfo{Domain: "github.com", Via: "accel", OK: true, Up: 512, Down: 4096})
+
+	snap := s.Snapshot()
+	if snap.RateUp <= 0 || snap.RateDown <= 0 {
+		t.Fatalf("RecordConn 后窗口内应有速率: %+v", snap)
+	}
+}
