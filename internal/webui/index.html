@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>light-github 控制台</title>
+<style>
+:root{
+  --bg:        oklch(16% 0.012 265);
+  --surface:   oklch(20% 0.014 265);
+  --surface-2: oklch(25% 0.016 265);
+  --line:      oklch(31% 0.018 265);
+  --text:      oklch(92% 0.005 265);
+  --muted:     oklch(66% 0.012 265);
+  --accent:    oklch(82% 0.14 168);
+  --info:      oklch(78% 0.12 240);
+  --warn:      oklch(78% 0.14 75);
+  --err:       oklch(70% 0.18 25);
+  --mono: ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --sans: -apple-system,"PingFang SC","Segoe UI",sans-serif;
+}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);color:var(--text);font:14px/1.5 var(--sans)}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+/* ---- 顶栏 ---- */
+header{position:sticky;top:0;z-index:9;display:flex;align-items:baseline;gap:1.25rem;
+  padding:.8rem 1.25rem;border-bottom:1px solid var(--line);
+  background:color-mix(in oklch,var(--bg) 88%,transparent);backdrop-filter:blur(8px)}
+.brand{font-size:1.05rem;font-weight:650;letter-spacing:.02em}
+.brand em{color:var(--accent);font-style:normal}
+.meta{display:flex;gap:1rem;color:var(--muted);font-size:.78rem;margin-left:auto;align-items:center}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:.35em;vertical-align:1px}
+.dot.ok{background:var(--accent)} .dot.bad{background:var(--err)}
+
+/* ---- 导航 ---- */
+nav{display:flex;gap:.25rem;padding:0 1.25rem;border-bottom:1px solid var(--line)}
+nav button{appearance:none;border:0;background:none;color:var(--muted);cursor:pointer;
+  padding:.7rem .9rem;font:inherit;font-size:.86rem;border-bottom:2px solid transparent;
+  transition:color .15s,border-color .15s}
+nav button:hover{color:var(--text)}
+nav button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+nav button.active{color:var(--text);border-bottom-color:var(--accent)}
+
+main{max-width:1100px;margin:0 auto;padding:1.25rem}
+section{display:none}
+section.active{display:block}
+
+/* ---- 卡片与网格 ---- */
+.grid{display:grid;gap:.9rem}
+.grid.c4{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:1rem 1.1rem}
+.card h3{font-size:.72rem;font-weight:500;color:var(--muted);letter-spacing:.08em;margin-bottom:.45rem}
+.big{font-size:1.7rem;font-weight:650;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:.78rem;margin-top:.15rem}
+canvas{width:100%;height:120px;display:block}
+
+/* ---- 表格 ---- */
+.scroll{max-height:60vh;overflow:auto;border:1px solid var(--line);border-radius:10px}
+table{width:100%;border-collapse:collapse;font-size:.82rem}
+th{position:sticky;top:0;background:var(--surface-2);color:var(--muted);font-weight:500;
+  text-align:left;padding:.5rem .7rem;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:.45rem .7rem;border-bottom:1px solid color-mix(in oklch,var(--line) 55%,transparent);
+  white-space:nowrap;font-family:var(--mono);font-size:.78rem}
+td.wrap{white-space:normal;font-family:var(--sans)}
+tr:hover td{background:color-mix(in oklch,var(--surface-2) 55%,transparent)}
+.lvl{font-weight:600;font-size:.72rem}
+.lvl.ERROR{color:var(--err)} .lvl.WARN{color:var(--warn)} .lvl.INFO{color:var(--info)} .lvl.DEBUG{color:var(--muted)}
+.tag{font-size:.68rem;padding:.1rem .45rem;border-radius:4px;border:1px solid var(--line);color:var(--muted)}
+.tag.ok{color:var(--accent);border-color:color-mix(in oklch,var(--accent) 40%,transparent)}
+.tag.fail{color:var(--err);border-color:color-mix(in oklch,var(--err) 40%,transparent)}
+.tag.sunk{color:var(--warn);border-color:color-mix(in oklch,var(--warn) 45%,transparent)}
+
+/* ---- 过滤器 / 表单 ---- */
+.toolbar{display:flex;gap:.5rem;align-items:center;margin-bottom:.8rem;flex-wrap:wrap}
+.toolbar .spacer{flex:1}
+select,input{background:var(--surface-2);border:1px solid var(--line);border-radius:7px;
+  color:var(--text);padding:.42rem .6rem;font:inherit;font-size:.84rem}
+select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+label{display:block;color:var(--muted);font-size:.78rem;margin:.7rem 0 .25rem}
+input{width:100%;font-family:var(--mono)}
+.btn{appearance:none;border:1px solid var(--line);background:var(--surface-2);color:var(--text);
+  border-radius:7px;padding:.45rem .95rem;font:inherit;font-size:.84rem;cursor:pointer;
+  transition:border-color .15s,background .15s}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.btn.primary{background:var(--accent);color:var(--bg);border-color:var(--accent);font-weight:600}
+.btn.primary:hover{filter:brightness(1.08);color:var(--bg)}
+.hint{font-size:.74rem;color:var(--muted)}
+.hint b{color:var(--warn);font-weight:500}
+form.config{max-width:430px}
+.flash{padding:.55rem .8rem;border-radius:7px;font-size:.82rem;margin-top:.8rem;display:none}
+.flash.show{display:block}
+.flash.ok{background:color-mix(in oklch,var(--accent) 14%,transparent);color:var(--accent)}
+.flash.err{background:color-mix(in oklch,var(--err) 14%,transparent);color:var(--err)}
+
+/* ---- 命令块 ---- */
+pre{background:var(--surface);border:1px solid var(--line);border-radius:10px;
+  padding:.85rem 1rem;overflow:auto;position:relative}
+pre code{font-family:var(--mono);font-size:.8rem;color:var(--accent)}
+.copy{position:absolute;top:.5rem;right:.5rem;font-size:.7rem;padding:.25rem .6rem}
+h2{font-size:1rem;font-weight:600;margin:1.4rem 0 .6rem}
+h2:first-child{margin-top:0}
+details{border:1px solid var(--line);border-radius:8px;margin-bottom:.45rem;background:var(--surface)}
+summary{cursor:pointer;padding:.55rem .8rem;font-family:var(--mono);font-size:.82rem;list-style:none}
+summary::-webkit-details-marker{display:none}
+summary::before{content:"▸";color:var(--muted);margin-right:.5rem;display:inline-block;transition:transform .15s}
+details[open] summary::before{transform:rotate(90deg)}
+.cands{padding:0 .8rem .6rem 1.9rem;font-size:.76rem;color:var(--muted);font-family:var(--mono)}
+.empty{color:var(--muted);padding:2rem;text-align:center;font-size:.85rem}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">light<em>-</em>github</div>
+  <div class="meta">
+    <span id="h-version"></span>
+    <span id="h-addr" class="num"></span>
+    <span id="h-uptime" class="num"></span>
+    <span><span id="h-src-dot" class="dot ok"></span><span id="h-src">规则源</span></span>
+  </div>
+</header>
+
+<nav id="nav">
+  <button data-tab="dash" class="active">仪表盘</button>
+  <button data-tab="conns">连接日志</button>
+  <button data-tab="logs">运行日志</button>
+  <button data-tab="rules">规则与测速</button>
+  <button data-tab="guide">接入指引</button>
+  <button data-tab="settings">设置</button>
+</nav>
+
+<main>
+
+<!-- 仪表盘 -->
+<section id="tab-dash" class="active">
+  <div class="grid c4">
+    <div class="card"><h3>实时下载</h3><div class="big num" id="s-rate-down">0 B/s</div><div class="sub">5s 滑动窗口</div></div>
+    <div class="card"><h3>实时上传</h3><div class="big num" id="s-rate-up">0 B/s</div><div class="sub">5s 滑动窗口</div></div>
+    <div class="card"><h3>累计流量</h3><div class="big num" id="s-total">↓ 0</div><div class="sub num" id="s-total-up">↑ 0</div></div>
+    <div class="card"><h3>连接</h3><div class="big num" id="s-conns">0</div><div class="sub" id="s-failed">失败 0</div></div>
+  </div>
+  <div class="card" style="margin-top:.9rem">
+    <h3>速率曲线（近 3 分钟）<span style="float:right"><span style="color:var(--accent)">■</span> 下载 <span style="color:var(--info)">■</span> 上传</span></h3>
+    <canvas id="rate-chart" width="1040" height="120"></canvas>
+  </div>
+  <div class="card" style="margin-top:.9rem">
+    <h3>规则源状态</h3>
+    <div id="s-sources" style="font-size:.82rem"><span class="empty" style="display:block;padding:.6rem">加载中…</span></div>
+  </div>
+</section>
+
+<!-- 连接日志 -->
+<section id="tab-conns">
+  <div class="toolbar">
+    <button class="btn" id="conn-refresh">刷新</button>
+    <span class="spacer"></span>
+    <span class="hint">每 2s 自动更新 · 最近 100 条</span>
+  </div>
+  <div class="scroll"><table>
+    <thead><tr><th>时间</th><th>域名</th><th>通道</th><th>出口 IP</th><th>拨号</th><th>↓</th><th>↑</th><th>状态</th></tr></thead>
+    <tbody id="conn-body"></tbody>
+  </table></div>
+</section>
+
+<!-- 运行日志 -->
+<section id="tab-logs">
+  <div class="toolbar">
+    <select id="log-kind">
+      <option value="all">全部日志</option>
+      <option value="app">仅运行日志</option>
+      <option value="conn">仅连接日志</option>
+    </select>
+    <select id="log-level">
+      <option value="">全部级别</option>
+      <option>ERROR</option><option>WARN</option><option>INFO</option><option>DEBUG</option>
+    </select>
+    <button class="btn" id="log-refresh">刷新</button>
+    <span class="spacer"></span>
+    <span class="hint">文件持久化于 ~/.light-github/logs/（自动轮转）</span>
+  </div>
+  <div class="scroll"><table>
+    <thead><tr><th>时间</th><th>级别</th><th>来源</th><th>内容</th></tr></thead>
+    <tbody id="log-body"></tbody>
+  </table></div>
+</section>
+
+<!-- 规则与测速 -->
+<section id="tab-rules">
+  <div class="toolbar">
+    <button class="btn" id="rules-refresh">刷新</button>
+    <button class="btn" id="rules-sel-refresh">立即刷新规则源</button>
+    <span class="spacer"></span>
+    <span class="hint" id="rules-count"></span>
+  </div>
+  <div id="rules-list"></div>
+</section>
+
+<!-- 接入指引 -->
+<section id="tab-guide">
+  <h2>git（仅 GitHub 流量走代理，零全局污染）</h2>
+  <pre><button class="btn copy" data-copy="g1">复制</button><code id="g1"></code></pre>
+  <h2>终端临时（当前会话）</h2>
+  <pre><button class="btn copy" data-copy="g2">复制</button><code id="g2"></code></pre>
+  <h2>curl 快速验证</h2>
+  <pre><button class="btn copy" data-copy="g3">复制</button><code id="g3"></code></pre>
+  <h2>系统代理 / PAC</h2>
+  <p class="hint">浏览器或系统代理填 PAC 地址（白名单自动分流）：</p>
+  <pre><button class="btn copy" data-copy="g4">复制</button><code id="g4"></code></pre>
+  <h2>WSL（Windows 宿主场景）</h2>
+  <p class="hint">服务以 <code class="num">-addr 0.0.0.0 -token &lt;随机串&gt;</code> 启动后，WSL 内：</p>
+  <pre><button class="btn copy" data-copy="g5">复制</button><code id="g5"></code></pre>
+</section>
+
+<!-- 设置 -->
+<section id="tab-settings">
+  <form class="config" id="config-form">
+    <label>监听地址（重启生效）</label>
+    <input name="addr" id="cf-addr" autocomplete="off">
+    <label>访问令牌 Token（非回环监听必填，重启生效）</label>
+    <input name="token" id="cf-token" autocomplete="off" placeholder="留空表示不启用">
+    <label>规则刷新周期（热生效）</label>
+    <input name="refresh" id="cf-refresh" autocomplete="off" placeholder="1h">
+    <label>日志级别（热生效）</label>
+    <select name="logLevel" id="cf-level">
+      <option value="info">info</option><option value="debug">debug</option>
+      <option value="warn">warn</option><option value="error">error</option>
+    </select>
+    <div style="margin-top:1rem;display:flex;gap:.6rem;align-items:center">
+      <button class="btn primary" type="submit">保存</button>
+      <span class="hint">写入 ~/.light-github/config.json</span>
+    </div>
+    <div class="flash" id="cf-flash"></div>
+  </form>
+</section>
+
+</main>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const TOKEN = new URLSearchParams(location.search).get("token") || "";
+
+async function api(path, opts) {
+  const url = new URL(path, location);
+  if (TOKEN) url.searchParams.set("token", TOKEN);
+  const resp = await fetch(url, opts);
+  const body = await resp.json().catch(() => ({}));
+  if (resp.status === 401) {
+    $("#h-src").textContent = "鉴权失败（URL 需带 ?token=）";
+    $("#h-src-dot").className = "dot bad";
+    throw new Error("unauthorized");
+  }
+  return body;
+}
+
+/* ---- 格式化 ---- */
+const fmtB = n => {
+  if (n < 1024) return n + " B";
+  const u = ["KB", "MB", "GB", "TB"];
+  let i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+  return n.toFixed(1) + " " + u[i];
+};
+const fmtT = s => {
+  const d = new Date(s), p = x => String(x).padStart(2, "0");
+  return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+};
+
+/* ---- Tab 切换 ---- */
+$("#nav").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-tab]");
+  if (!btn) return;
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b === btn));
+  document.querySelectorAll("main section").forEach(s =>
+    s.classList.toggle("active", s.id === "tab-" + btn.dataset.tab));
+});
+
+/* ---- 仪表盘 ---- */
+const rateHist = { down: [], up: [], max: 60 };
+let statusCache = null;
+
+async function pollStats() {
+  if (document.hidden) return;
+  const body = await api("/api/stats").catch(() => null);
+  if (!body || !body.success) return;
+  const d = body.data;
+  $("#s-rate-down").textContent = fmtB(d.rateDown) + "/s";
+  $("#s-rate-up").textContent = fmtB(d.rateUp) + "/s";
+  $("#s-total").textContent = "↓ " + fmtB(d.totalDown);
+  $("#s-total-up").textContent = "↑ " + fmtB(d.totalUp);
+  $("#s-conns").textContent = d.totalConns;
+  $("#s-failed").textContent = "失败 " + d.failedConns;
+  rateHist.down.push(d.rateDown); rateHist.up.push(d.rateUp);
+  if (rateHist.down.length > rateHist.max) { rateHist.down.shift(); rateHist.up.shift(); }
+  drawChart();
+}
+
+function drawChart() {
+  const cv = $("#rate-chart"), ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height, pad = 4;
+  ctx.clearRect(0, 0, W, H);
+  const max = Math.max(1024, ...rateHist.down, ...rateHist.up) * 1.15;
+  const line = (data, color, fill) => {
+    if (!data.length) return;
+    ctx.beginPath();
+    data.forEach((v, i) => {
+      const x = pad + i / (rateHist.max - 1) * (W - pad * 2);
+      const y = H - pad - v / max * (H - pad * 2);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    if (fill) {
+      ctx.lineTo(W - pad, H); ctx.lineTo(pad, H); ctx.closePath();
+      ctx.fillStyle = color.replace("1)", "0.12)"); ctx.fill();
+      ctx.beginPath();
+      data.forEach((v, i) => {
+        const x = pad + i / (rateHist.max - 1) * (W - pad * 2);
+        const y = H - pad - v / max * (H - pad * 2);
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      });
+    }
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
+  };
+  line(rateHist.up, "rgb(120,150,240,1)", true);
+  line(rateHist.down, "rgb(110,230,180,1)", true);
+}
+
+async function pollStatus() {
+  const body = await api("/api/status").catch(() => null);
+  if (!body || !body.success) return;
+  const d = body.data;
+  statusCache = d;
+  $("#h-version").textContent = "v" + d.version;
+  $("#h-addr").textContent = d.addr;
+  $("#h-uptime").textContent = "运行 " + d.uptime;
+  const lastOk = d.lastOk;
+  $("#h-src-dot").className = "dot " + (lastOk ? "ok" : "bad");
+  $("#h-src").textContent = "规则 " + d.ruleCount + " 条";
+  $("#s-sources").innerHTML = (d.sources || []).map(s =>
+    `<div style="display:flex;gap:.6rem;align-items:baseline;padding:.3rem 0">
+      <span class="dot ${s.ok ? "ok" : "bad"}"></span>
+      <span style="min-width:6.5em">${s.name}</span>
+      <span style="color:${s.ok ? "var(--muted)" : "var(--err)"}">${s.ok ? "正常" : s.err}</span>
+    </div>`).join("") || '<div class="empty">尚无刷新记录</div>';
+}
+
+/* ---- 连接日志 ---- */
+async function pollConns() {
+  if (document.hidden || !$("#tab-conns").classList.contains("active")) return;
+  const body = await api("/api/logs?kind=conn&limit=100").catch(() => null);
+  if (!body || !body.success) return;
+  const rows = (body.data.entries || []).map(e => {
+    const a = e.attrs || {};
+    return `<tr>
+      <td>${fmtT(e.at)}</td><td>${a.domain || ""}</td>
+      <td>${a.via || ""}</td><td>${a.ip || "—"}</td>
+      <td>${a.dialMs != null ? a.dialMs + "ms" : "—"}</td>
+      <td>${fmtB(a.down || 0)}</td><td>${fmtB(a.up || 0)}</td>
+      <td>${a.ok ? '<span class="tag ok">成功</span>' : '<span class="tag fail">失败</span>'}</td>
+    </tr>`;
+  });
+  $("#conn-body").innerHTML = rows.join("") || '<tr><td colspan="8" class="empty">暂无连接</td></tr>';
+}
+
+/* ---- 运行日志 ---- */
+async function loadLogs() {
+  const kind = $("#log-kind").value, level = $("#log-level").value;
+  const body = await api(`/api/logs?kind=${kind}&limit=300`).catch(() => null);
+  if (!body || !body.success) return;
+  const rows = (body.data.entries || [])
+    .filter(e => !level || e.level === level)
+    .map(e => `<tr>
+      <td>${fmtT(e.at)}</td>
+      <td><span class="lvl ${e.level}">${e.level}</span></td>
+      <td>${e.kind === "conn" ? "连接" : "运行"}</td>
+      <td class="wrap">${esc(e.msg)}${fmtAttrs(e.attrs)}</td>
+    </tr>`);
+  $("#log-body").innerHTML = rows.join("") || '<tr><td colspan="4" class="empty">暂无日志</td></tr>';
+}
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmtAttrs = a => {
+  if (!a) return "";
+  const parts = Object.entries(a).map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`);
+  return parts.length ? ` <span style="color:var(--muted)">${esc(parts.join(" "))}</span>` : "";
+};
+$("#log-kind").addEventListener("change", loadLogs);
+$("#log-level").addEventListener("change", loadLogs);
+$("#log-refresh").addEventListener("click", loadLogs);
+$("#conn-refresh").addEventListener("click", pollConns);
+
+/* ---- 规则与测速 ---- */
+async function loadRules() {
+  const body = await api("/api/rules").catch(() => null);
+  if (!body || !body.success) return;
+  const d = body.data;
+  const inspect = new Map((d.domains || []).map(x => [x.domain, x]));
+  $("#rules-count").textContent = `共 ${d.rules.length} 条规则 · ${(d.domains || []).length} 个域名已测速`;
+  $("#rules-list").innerHTML = (d.rules || []).map(r => {
+    const ins = inspect.get(r.Domain || r.domain);
+    const cands = ins ? (ins.candidates || []).map(c =>
+      `<div>${c.ip} · ${c.costMs}ms ${c.sunk ? '<span class="tag sunk">沉底</span>' : ""}
+        ${c.failure > 0 && !c.sunk ? `<span class="tag">失败${c.failure}</span>` : ""}</div>`).join("")
+      : '<div style="color:var(--muted)">未测速（等待首次使用或预热）</div>';
+    return `<details><summary>${r.Domain || r.domain} <span class="tag">${r.Kind || r.kind}</span></summary>
+      <div class="cands">${r.Forward && r.Forward !== "" ? "forward: " + (r.Forward || r.forward) + "<br>" : ""}${cands}</div>
+    </details>`;
+  }).join("");
+}
+$("#rules-refresh").addEventListener("click", loadRules);
+$("#rules-sel-refresh").addEventListener("click", async e => {
+  e.target.disabled = true;
+  const body = await api("/api/rules/refresh", { method: "POST" }).catch(() => null);
+  e.target.disabled = false;
+  if (body && body.success) { await loadRules(); await pollStatus(); }
+});
+
+/* ---- 接入指引 ---- */
+function renderGuide() {
+  const addr = (statusCache && statusCache.addr) || location.host;
+  const t = TOKEN ? "?token=" + TOKEN : "";
+  $("#g1").textContent = `git config --global http.https://github.com.proxy http://${addr}`;
+  $("#g2").textContent = `export https_proxy=http://${addr} http_proxy=http://${addr}`;
+  $("#g3").textContent = `curl -x http://${addr} -sI https://github.com | head -1`;
+  $("#g4").textContent = `http://${addr}/pac${t}`;
+  $("#g5").textContent = `export https_proxy=http://$(grep nameserver /etc/resolv.conf | awk '{print $2}'):12800`;
+}
+document.addEventListener("click", async e => {
+  const btn = e.target.closest(".copy");
+  if (!btn) return;
+  await navigator.clipboard.writeText($("#" + btn.dataset.copy).textContent);
+  const old = btn.textContent;
+  btn.textContent = "已复制";
+  setTimeout(() => btn.textContent = old, 1200);
+});
+
+/* ---- 设置 ---- */
+async function loadConfig() {
+  const body = await api("/api/config").catch(() => null);
+  if (!body || !body.success) return;
+  const c = body.data;
+  $("#cf-addr").value = c.addr;
+  $("#cf-token").value = c.token || "";
+  $("#cf-refresh").value = c.refresh;
+  $("#cf-level").value = c.logLevel;
+}
+$("#config-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const flash = $("#cf-flash");
+  const cur = statusCache ? { addr: statusCache.addr } : {};
+  const body = {
+    logLevel: $("#cf-level").value,
+    refresh: $("#cf-refresh").value.trim(),
+  };
+  const addr = $("#cf-addr").value.trim(), token = $("#cf-token").value;
+  if (addr && addr !== cur.addr) body.addr = addr;   // 未变更不提交（避免误触重启提示）
+  if (token) body.token = token;
+  const resp = await api("/api/config", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).catch(() => null);
+  flash.className = "flash show " + (resp && resp.success ? "ok" : "err");
+  if (resp && resp.success) {
+    const restart = resp.data && resp.data.needRestart;
+    flash.textContent = restart ? "已保存。<b>监听地址/令牌将在重启后生效</b>" : "已保存并热生效";
+    if (!restart) await loadConfig();
+  } else {
+    flash.textContent = (resp && resp.error) || "保存失败";
+  }
+});
+
+/* ---- 轮询调度 ---- */
+setInterval(pollStats, 2000);
+setInterval(pollConns, 2000);
+setInterval(pollStatus, 5000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { pollStats(); pollStatus(); } });
+
+(async function init() {
+  await pollStatus();
+  renderGuide();
+  pollStats();
+  loadLogs();
+  loadRules();
+  loadConfig();
+})();
+</script>
+</body>
+</html>
