@@ -6,20 +6,8 @@
 package sysproxy
 
 import (
-	"bytes"
-	"os/exec"
 	"strings"
 )
-
-// execRun 可注入的命令执行器（测试替换；生产走真实 exec）
-var execRun = func(name string, args ...string) (string, error) {
-	var out bytes.Buffer
-	c := exec.Command(name, args...) //nolint:gosec // 参数均为常量/程序内构造
-	c.Stdout = &out
-	c.Stderr = &out
-	err := c.Run()
-	return out.String(), err
-}
 
 // Enable 为全部启用的网络服务设置 PAC 自动代理。
 // 单个服务失败容忍（如虚拟网卡/蓝牙），任一成功即整体成功。

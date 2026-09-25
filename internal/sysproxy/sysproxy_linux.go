@@ -5,20 +5,9 @@
 package sysproxy
 
 import (
-	"bytes"
 	"errors"
-	"os/exec"
 	"strings"
 )
-
-var execRun = func(name string, args ...string) (string, error) {
-	var out bytes.Buffer
-	c := exec.Command(name, args...) //nolint:gosec // 参数均为常量/程序内构造
-	c.Stdout = &out
-	c.Stderr = &out
-	err := c.Run()
-	return out.String(), err
-}
 
 // Enable 设置 GNOME 系统代理为 PAC 模式。
 func Enable(pacURL string) error {

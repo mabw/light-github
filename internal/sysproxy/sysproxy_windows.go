@@ -6,21 +6,10 @@
 package sysproxy
 
 import (
-	"bytes"
-	"os/exec"
 	"strings"
 )
 
 const regPath = `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
-
-var execRun = func(name string, args ...string) (string, error) {
-	var out bytes.Buffer
-	c := exec.Command(name, args...) //nolint:gosec // 参数均为常量/程序内构造
-	c.Stdout = &out
-	c.Stderr = &out
-	err := c.Run()
-	return out.String(), err
-}
 
 // Enable 设置 PAC 自动代理（AutoConfigURL）。
 func Enable(pacURL string) error {
