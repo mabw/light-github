@@ -3,6 +3,7 @@ package selector
 import (
 	"context"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,11 +27,11 @@ func (f *fakeResolver) Resolve(_ context.Context, domain string) ([]net.IP, erro
 
 type fakeProber struct {
 	costs map[string]time.Duration // ip → 耗时；未配置的返回 10ms
-	calls int
+	calls atomic.Int64             // 并发测速下原子计数（buildCandidates 每 IP 一个 goroutine）
 }
 
 func (f *fakeProber) Probe(_ context.Context, ip net.IP) time.Duration {
-	f.calls++
+	f.calls.Add(1)
 	if d, ok := f.costs[ip.String()]; ok {
 		return d
 	}
@@ -128,11 +129,11 @@ func TestPick_CachesProbeWithinTTL(t *testing.T) {
 	if _, err := s.Pick(context.Background(), "x.com"); err != nil {
 		t.Fatal(err)
 	}
-	first := prober.calls
+	first := prober.calls.Load()
 	if _, err := s.Pick(context.Background(), "x.com"); err != nil {
 		t.Fatal(err)
 	}
-	if prober.calls != first {
+	if prober.calls.Load() != first {
 		t.Fatalf("TTL 内二次 Pick 不应重复测速: first=%d now=%d", first, prober.calls)
 	}
 }
