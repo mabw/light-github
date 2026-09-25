@@ -70,3 +70,13 @@
 - 发现新债务：加条目，标注发现场景（测试/验收/评审），不立即修的写明原因
 - 清偿债务：移入"已清偿"，注明 commit 与验证方式；优先级按目标里程碑排列
 - 与 `docs/DESIGN.md` §7 风险表区分：那边是"外部风险与对策"，这边是"代码内部欠账"
+
+## 待清偿
+
+### DEBT-7 🟢 sysproxy 的 Windows/Linux 分支未经真机验证
+
+- **位置**：`internal/sysproxy/sysproxy_windows.go`、`sysproxy_linux.go`
+- **描述**：macOS 分支已完整验证（接入/还原/退出闭环）；Windows 用 `reg add/delete AutoConfigURL`（WinINET 可能需 InternetSetOption 广播才即时生效），Linux 仅支持 GNOME gsettings（KDE 无统一接口）。
+- **影响**：M4 三平台分发前必须真机过一遍；WinINET 即时生效问题可能需要改用 syscall（InternetSetOption）。
+- **目标**：M4。
+
