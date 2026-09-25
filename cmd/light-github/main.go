@@ -277,10 +277,35 @@ func main() {
 		}
 	}()
 
+	// 统一退出清理（sync.Once：托盘路径与 headless 兜底可能先后触达）。
+	// 托盘模式下 cleanup 必须先于 systray.Quit 执行——Quit 即进程终止（darwin）。
+	var shutdownOnce sync.Once
+	shutdown := func() {
+		shutdownOnce.Do(func() {
+			log.Info("正在退出…")
+			_ = srv.Close()
+
+			// 系统 PAC 指向我们时还原，避免浏览器悬空（零侵入承诺的完整闭环）
+			if sysproxy.Enabled(pacURL) {
+				if err := sysproxy.Disable(); err == nil {
+					log.Info("退出时已还原系统代理设置")
+				} else {
+					log.Warn("退出时还原系统代理失败", "err", err)
+				}
+			}
+
+			snap := store.Snapshot()
+			log.Info("本次会话统计",
+				"conns", snap.TotalConns, "failed", snap.FailedConns,
+				"up", snap.TotalUp, "down", snap.TotalDown)
+		})
+	}
+
 	// 常驻形态：托盘（默认，主线程 Cocoa 循环）或 headless 等信号。
-	// 两路退出（托盘 Quit / OS 信号）都走 cancel → 下方统一清理。
+	// 两路退出（托盘 Quit / OS 信号）都走 cancel → 统一 cleanup → 退出。
 	if *noTray {
 		<-ctx.Done()
+		shutdown()
 	} else {
 		uiURL := "http://" + loopbackAddr(listenAddr.String())
 		if err := tray.Run(ctx, tray.Deps{
@@ -294,27 +319,12 @@ func main() {
 			SysProxyState:   func() bool { return sysproxy.Enabled(pacURL) },
 			ToggleAutostart: toggleAutostart,
 			AutostartState:  autostart.Enabled,
-		}); err != nil {
+		}, shutdown); err != nil {
 			log.Warn("托盘不可用，回退 headless 运行", "err", err)
 			<-ctx.Done()
+			shutdown()
 		}
 	}
-	log.Info("正在退出…")
-	_ = srv.Close()
-
-	// 退出清理：系统 PAC 指向我们时还原，避免浏览器悬空（零侵入承诺的完整闭环）
-	if sysproxy.Enabled(pacURL) {
-		if err := sysproxy.Disable(); err == nil {
-			log.Info("退出时已还原系统代理设置")
-		} else {
-			log.Warn("退出时还原系统代理失败", "err", err)
-		}
-	}
-
-	snap := store.Snapshot()
-	log.Info("本次会话统计",
-		"conns", snap.TotalConns, "failed", snap.FailedConns,
-		"up", snap.TotalUp, "down", snap.TotalDown)
 }
 
 // validateListen 非 loopback 监听必须配置 Token（DEBT-6：0.0.0.0 会把未鉴权代理暴露给局域网）

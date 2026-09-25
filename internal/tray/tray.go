@@ -84,14 +84,20 @@ type menuSet struct {
 }
 
 // Run 阻塞主线程直到托盘退出（macOS 要求 Cocoa 主线程）。
-// ctx 取消（信号/服务侧退出）时自动结束托盘循环。
-func Run(ctx context.Context, deps Deps) error {
+//
+// 关键契约（darwin 实证 2026-09-26）：systray.Quit() 即 [NSApp terminate:]，
+// 进程随即终止且不再返回 Go——因此 cleanup 必须在 Quit 之前同步执行完毕。
+// 无论退出来自托盘菜单还是 OS 信号（ctx done），顺序恒为 cleanup → Quit。
+func Run(ctx context.Context, deps Deps, cleanup func()) error {
 	if err := deps.validate(); err != nil {
 		return err
 	}
 	go func() {
 		<-ctx.Done()
-		systray.Quit()
+		if cleanup != nil {
+			cleanup() // 服务收尾（还原系统代理/会话统计/关监听）
+		}
+		systray.Quit() // darwin：进程在此终止，下方 return 不可达
 	}()
 	systray.Run(func() { onReady(deps) }, nil)
 	return nil
