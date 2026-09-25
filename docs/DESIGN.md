@@ -144,9 +144,12 @@ type Rule struct {
 
 ### 3.6 Web UI（`web/` + `internal/webui`）
 
-- 技术栈：单页静态 HTML + 原生 JS（或 Preact，保持 <50KB），无构建链或极简构建（esbuild）
-- 同一套页面两个入口：桌面窗口（Wails WebView）与浏览器 `http://127.0.0.1:12801`
-- 页面：仪表盘（开关/实时速率图/今日流量）· 域名管理（启用/测速明细/手动固定 IP）· 日志 · 诊断 · 设置（监听地址/DoH 节点/自启/接入配置命令生成）
+**定位（2026-09-25 定案）**：仅控制项与观测窗口，无业务逻辑——因此不引入桌面框架，纯静态页 + REST。
+
+- 技术栈：单文件 HTML + 原生 JS（<30KB，零构建链），1s 轮询
+- 唯一入口：浏览器 `http://127.0.0.1:12801`（托盘菜单/点击 Dock 图标打开）
+- API 面（约 7 端点）：`GET /api/status` `/api/stats` `/api/logs` `/api/rules` `/pac`；`POST /api/rules/refresh` `/api/config`
+- 页面 tab：仪表盘 · 连接日志 · 规则与测速明细 · 接入指引 · 设置（监听地址/DoH/自启）
 
 ### 3.7 平台层（`internal/platform`）
 
@@ -154,7 +157,7 @@ type Rule struct {
 |---|---|---|---|
 | 托盘/菜单栏 | `energye/systray` v1.0.3（spike-d 已验证：CGO 编译链 OK、2.9MB 单二进制；注意其 API 与 getlantern 原版不同——菜单项为回调式 `Click(fn)`，macOS 左键点击需 `SetOnClick(m.ShowMenu)` 才弹菜单；图标为 template PNG 需 @1x/@2x 抗锯齿两套） | 同左 | 同左（XDG AppIndicator） |
 | 开机自启 | `SMAppService`（Login Items，via `go-hybrid/cocoa` 或 exec `osascript`） | 注册表 `HKCU\...\Run`（无 UAC） | `~/.config/autostart/*.desktop` 或 systemd user unit |
-| 桌面图标/窗口 | Wails 窗口；可选仅菜单栏（LSUIElement） | Wails 窗口 + 托盘 | Wails 窗口（依赖 webkit2gtk，CLI 模式无此依赖） |
+| 桌面图标/窗口 | 仅菜单栏（默认）或常驻 Dock（点击=浏览器打开 UI） | 托盘 + 快捷方式（打开 UI） | 托盘 + .desktop（打开 UI） |
 
 - 桌面窗口 = 内嵌 WebView 加载 §3.6 页面；`--headless` 模式跳过窗口仅托盘+Web
 
@@ -174,7 +177,7 @@ type Rule struct {
 | 项 | 选择 | 备选与理由 |
 |---|---|---|
 | 语言 | Go | 单二进制交叉编译、std 库覆盖代理所需全部能力；Rust 开发周期长 |
-| 桌面框架 | Wails v2（spike 验证） | 备选：纯 `energye/systray` + 系统浏览器打开 UI（更轻，无 webkit 依赖）；Wails v3 alpha 有原生 tray 但不稳 |
+| 桌面框架 | **不使用**（2026-09-25 定案）：`energye/systray` + 系统浏览器打开 Web UI | 曾评估 Wails：v2 无内置托盘（与 systray 主线程共存未验证）、v3 托盘仍 alpha（macOS/Linux 多个 open bug，见 wailsapp/wails#6045 等）；Web UI 仅控制+观测无业务逻辑，binding 价值为零。3MB vs 10MB+ 二进制、零 WebView 依赖矩阵、页面 100% 复用随时可反悔加壳 |
 | 依赖总量目标 | ≤10 个直接依赖 | proxy/doh 测速均 stdlib 实现；仅 systray、wails、可选 JSON 库 |
 | 打包 | goreleaser | 三平台矩阵（darwin amd64/arm64、windows amd64/arm64、linux amd64/arm64） |
 
@@ -200,7 +203,7 @@ type Rule struct {
 
 | 风险 | 等级 | 对策 |
 |---|---|---|
-| ~~Wails v2 无内置托盘~~ | ~~中~~ → 低 | spike-d 已验证 `energye/systray` 独立可用（编译/图标/菜单/交互全通过）；剩余仅 Wails 窗口与 systray 共存性，M2 验证；降级方案：无窗口纯托盘 + 浏览器 UI |
+| ~~Wails v2 无内置托盘~~ | 已消除 | 选型定案不使用 Wails：`energye/systray` 独立可用（spike-d 验证），UI 走浏览器（§4）；M3 的 Dock/桌面图标用系统原生机制（osascript/open 等），不引 WebView |
 | steampp 的 HF/greasyfork 配置走官方中转带宽（mossimo.top） | — | 明确不使用：归一化时标记 Relay 降级 Dynamic，白嫖边界仅限公开 JSON API + CNAME DNS 记录 |
 | steampp API 变更/关闭 | 中 | 可插拔三源 + 本地缓存 + 内置兜底清单 |
 | GitHub520 数据源服务器 2026-12-31 到期 | 低 | 仅作备源；可切换 raw.githubusercontent.com 镜像 |
