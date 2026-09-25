@@ -27,6 +27,42 @@ func writeSimpleResponse(c net.Conn, code int, msg string) error {
 	return err
 }
 
+// connWriter 把裸 net.Conn 适配成 http.ResponseWriter 供 Web handler 使用。
+// 每响应一个请求即关连接（Connection: close 定界；控制台为低频轮询，无 keep-alive 必要）。
+type connWriter struct {
+	c     net.Conn
+	h     http.Header
+	wrote bool
+}
+
+func newConnWriter(c net.Conn) *connWriter { return &connWriter{c: c, h: http.Header{}} }
+
+func (w *connWriter) Header() http.Header { return w.h }
+
+func (w *connWriter) WriteHeader(code int) {
+	if w.wrote {
+		return
+	}
+	w.wrote = true
+	fmt.Fprintf(w.c, "HTTP/1.1 %d %s\r\n", code, http.StatusText(code))
+	for k, vs := range w.h {
+		for _, v := range vs {
+			fmt.Fprintf(w.c, "%s: %s\r\n", k, v)
+		}
+	}
+	io.WriteString(w.c, "Connection: close\r\n\r\n")
+}
+
+func (w *connWriter) Write(b []byte) (int, error) {
+	if !w.wrote {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.c.Write(b)
+}
+
+// Flush no-op（接口兼容；控制台无流式推送场景）
+func (w *connWriter) Flush() {}
+
 // Dialer 出站选择器抽象（selector.Selector 实现之）。
 type Dialer interface {
 	Pick(ctx context.Context, domain string) ([]net.IP, error)
@@ -43,6 +79,7 @@ type Server struct {
 	DialTimeout time.Duration // 单候选拨号超时；零值默认 5s
 	IdleTimeout time.Duration // 隧道空闲超时（DEBT-2）；零值默认 5min
 	Token       string        // 非空时 CONNECT 必须携带 Proxy-Authorization: Bearer（DEBT-6）
+	Web         http.Handler  // M2-5 端口复用：origin-form 请求（控制台/API）交给它；nil 则一律 400
 
 	mu    sync.RWMutex
 	table *rule.Table
@@ -105,7 +142,13 @@ func (s *Server) handleConn(client net.Conn) {
 		return
 	}
 	if req.Method != http.MethodConnect {
-		_ = writeSimpleResponse(client, http.StatusBadRequest, "only CONNECT supported")
+		// M2-5 端口复用：origin-form（GET /api/...）是控制台流量 → Web；
+		// absolute-form（GET http://...）是普通代理语义 → 本工具不提供，400
+		if s.Web != nil && req.URL.Host == "" {
+			s.Web.ServeHTTP(newConnWriter(client), req)
+		} else {
+			_ = writeSimpleResponse(client, http.StatusBadRequest, "only CONNECT supported")
+		}
 		return
 	}
 	// DEBT-6：非 loopback 监听场景的访问控制（cmd 层强制 0.0.0.0 必须配 Token）
