@@ -55,6 +55,8 @@ type Selector struct {
 	prober   Prober
 	ttl      time.Duration
 
+	tblMu sync.RWMutex // 规则表热更新（数据源刷新时 SetTable 换入）
+
 	mu     sync.Mutex // 仅保护 states map 的读写
 	states map[string]*domainState
 }
@@ -68,6 +70,29 @@ func New(tbl *rule.Table, resolver Resolver, prober Prober, cacheTTL time.Durati
 		ttl:      cacheTTL,
 		states:   map[string]*domainState{},
 	}
+}
+
+// SetTable 原子替换规则表并清空测速缓存时间戳（策略已变，
+// 各域名下次 Pick 重建候选；failure 记忆与旧候选保留供兜底）。
+func (s *Selector) SetTable(t *rule.Table) {
+	s.tblMu.Lock()
+	s.tbl = t
+	s.tblMu.Unlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, st := range s.states {
+		st.mu.Lock()
+		st.probedAt = time.Time{}
+		st.mu.Unlock()
+	}
+}
+
+// currentTable 返回当前规则表
+func (s *Selector) currentTable() *rule.Table {
+	s.tblMu.RLock()
+	defer s.tblMu.RUnlock()
+	return s.tbl
 }
 
 // stateFor 取或建域名的分片状态（map 短锁）
@@ -212,7 +237,7 @@ func (s *Selector) buildCandidates(ctx context.Context, domain string, st *domai
 
 // candidateIPs 按规则策略产出原始候选（可能为空 + err）。
 func (s *Selector) candidateIPs(ctx context.Context, domain string) ([]net.IP, error) {
-	r, matched := s.tbl.Match(domain)
+	r, matched := s.currentTable().Match(domain)
 
 	if matched && r.Kind == rule.KindFixedIP {
 		if fixed := net.ParseIP(r.Forward); fixed != nil {

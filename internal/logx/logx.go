@@ -30,6 +30,7 @@ type Options struct {
 	Compress   bool // 备份是否 gzip（默认 false，cmd 层显式开启）
 	AppRing    int  // 运行日志内存环形容量（默认 500，供 UI）
 	ConnRing   int  // 连接日志内存环形容量（默认 1000，供 UI）
+	Stderr     bool // 运行日志同时输出终端（cmd 常驻进程用；测试关闭避免噪音）
 }
 
 // Entry 内存缓冲中的单条日志（Web UI 数据形状）。
@@ -48,8 +49,7 @@ type Manager struct {
 	connRing  *ring
 	appFile   *lumberjack.Logger
 	connFile  *lumberjack.Logger
-	appLevel  slog.Level
-	connLevel slog.Level
+	appLevel  *slog.LevelVar // 运行时可调（Web UI 设置热生效）
 }
 
 // New 构建日志系统（连接日志固定 INFO 级别——每条连接都是有效事件，无需级别开关）。
@@ -71,11 +71,20 @@ func New(opts Options) *Manager {
 		Compress:   opts.Compress,
 	}
 
+	level := new(slog.LevelVar)
+	level.Set(opts.Level)
+
+	handlers := []slog.Handler{
+		newRingHandler(appRing, level),
+		slog.NewJSONHandler(appFile, &slog.HandlerOptions{Level: level}),
+	}
+	if opts.Stderr {
+		handlers = append(handlers,
+			slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	}
+
 	return &Manager{
-		app: slog.New(newFanout(
-			newRingHandler(appRing, opts.Level),
-			slog.NewJSONHandler(appFile, &slog.HandlerOptions{Level: opts.Level}),
-		)),
+		app: slog.New(newFanout(handlers...)),
 		conn: slog.New(newFanout(
 			newRingHandler(connRing, slog.LevelInfo),
 			slog.NewJSONHandler(connFile, &slog.HandlerOptions{Level: slog.LevelInfo}),
@@ -84,8 +93,12 @@ func New(opts Options) *Manager {
 		connRing: connRing,
 		appFile:  appFile,
 		connFile: connFile,
+		appLevel: level,
 	}
 }
+
+// SetLevel 运行时调整运行日志级别（内存/文件/终端三路同时生效）。
+func (m *Manager) SetLevel(l slog.Level) { m.appLevel.Set(l) }
 
 // App 运行日志（启停/规则刷新/DoH 与源失败/测速决策）。
 func (m *Manager) App() *slog.Logger { return m.app }

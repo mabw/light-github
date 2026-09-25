@@ -11,9 +11,7 @@ import (
 func newManager(t *testing.T, opts Options) (*Manager, string) {
 	t.Helper()
 	opts.Dir = t.TempDir()
-	if opts.Level == 0 {
-		opts.Level = slog.LevelDebug
-	}
+	// 注：slog.LevelInfo == 0，零值即 info，不做事默认填充
 	m := New(opts)
 	t.Cleanup(func() { _ = m.Close() })
 	return m, opts.Dir

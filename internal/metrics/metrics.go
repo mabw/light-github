@@ -41,6 +41,10 @@ type sample struct {
 type Store struct {
 	window time.Duration
 
+	// OnRecord 每条连接记录后的同步回调（锁外调用）。
+	// M2 用途：logx 把连接日志落盘；nil 则跳过。
+	OnRecord func(ConnInfo)
+
 	mu        sync.Mutex
 	totalUp   int64
 	totalDown int64
@@ -71,7 +75,6 @@ func (s *Store) Add(up, down int64) {
 func (s *Store) RecordConn(info ConnInfo) {
 	info.At = time.Now()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.totalUp += info.Up
 	s.totalDown += info.Down
 	s.conns++
@@ -85,6 +88,11 @@ func (s *Store) RecordConn(info ConnInfo) {
 	s.connLog = append([]ConnInfo{info}, s.connLog...)
 	if len(s.connLog) > s.logMax {
 		s.connLog = s.connLog[:s.logMax]
+	}
+	s.mu.Unlock()
+
+	if s.OnRecord != nil {
+		s.OnRecord(info) // 锁外回调，实现方自行保证并发安全
 	}
 }
 
