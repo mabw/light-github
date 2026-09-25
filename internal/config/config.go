@@ -20,11 +20,13 @@ const (
 // Config 用户配置。字段约定：
 //   - Addr / Token：重启生效（监听建立后不可变）
 //   - Refresh / LogLevel：热生效（Web UI 修改后立即应用）
+//   - AutoSysProxy：启动时自动接入系统代理 PAC（退出仍自动还原）；默认 false
 type Config struct {
-	Addr     string        `json:"addr"`
-	Token    string        `json:"token,omitempty"`
-	Refresh  time.Duration `json:"refresh"`
-	LogLevel string        `json:"logLevel"`
+	Addr         string        `json:"addr"`
+	Token        string        `json:"token,omitempty"`
+	Refresh      time.Duration `json:"refresh"`
+	LogLevel     string        `json:"logLevel"`
+	AutoSysProxy bool          `json:"autoSysProxy"`
 }
 
 func defaults() Config {
@@ -39,26 +41,28 @@ func defaults() Config {
 // （Web 设置页与配置文件双受益）。
 func (c Config) MarshalJSON() ([]byte, error) {
 	type plain struct {
-		Addr     string `json:"addr"`
-		Token    string `json:"token,omitempty"`
-		Refresh  string `json:"refresh"`
-		LogLevel string `json:"logLevel"`
+		Addr         string `json:"addr"`
+		Token        string `json:"token,omitempty"`
+		Refresh      string `json:"refresh"`
+		LogLevel     string `json:"logLevel"`
+		AutoSysProxy bool   `json:"autoSysProxy"`
 	}
-	return json.Marshal(plain{Addr: c.Addr, Token: c.Token, Refresh: c.Refresh.String(), LogLevel: c.LogLevel})
+	return json.Marshal(plain{Addr: c.Addr, Token: c.Token, Refresh: c.Refresh.String(), LogLevel: c.LogLevel, AutoSysProxy: c.AutoSysProxy})
 }
 
 // UnmarshalJSON 兼容两种形态：字符串时长（"30m"，新格式）与纳秒数字（旧格式）。
 func (c *Config) UnmarshalJSON(b []byte) error {
 	var raw struct {
-		Addr     string          `json:"addr"`
-		Token    string          `json:"token"`
-		Refresh  json.RawMessage `json:"refresh"`
-		LogLevel string          `json:"logLevel"`
+		Addr         string          `json:"addr"`
+		Token        string          `json:"token"`
+		Refresh      json.RawMessage `json:"refresh"`
+		LogLevel     string          `json:"logLevel"`
+		AutoSysProxy bool            `json:"autoSysProxy"`
 	}
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return err
 	}
-	c.Addr, c.Token, c.LogLevel = raw.Addr, raw.Token, raw.LogLevel
+	c.Addr, c.Token, c.LogLevel, c.AutoSysProxy = raw.Addr, raw.Token, raw.LogLevel, raw.AutoSysProxy
 
 	s := strings.TrimSpace(string(raw.Refresh))
 	switch {

@@ -95,6 +95,8 @@ select,input{background:var(--surface-2);border:1px solid var(--line);border-rad
 select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 label{display:block;color:var(--muted);font-size:.78rem;margin:.7rem 0 .25rem}
 input{width:100%;font-family:var(--mono)}
+label.check{display:flex;align-items:center;gap:.5rem;color:var(--text);font-size:.84rem;cursor:pointer}
+input[type="checkbox"]{width:auto;accent-color:var(--accent)}
 .btn{appearance:none;border:1px solid var(--line);background:var(--surface-2);color:var(--text);
   border-radius:7px;padding:.45rem .95rem;font:inherit;font-size:.84rem;cursor:pointer;
   transition:border-color .15s,background .15s}
@@ -258,6 +260,7 @@ details[open] summary::before{transform:rotate(90deg)}
       <option value="info">info</option><option value="debug">debug</option>
       <option value="warn">warn</option><option value="error">error</option>
     </select>
+    <label class="check" style="margin-top:1rem"><input type="checkbox" id="cf-autosys">启动时自动接入系统代理（PAC，退出自动还原）</label>
     <div style="margin-top:1rem;display:flex;gap:.6rem;align-items:center">
       <button class="btn primary" type="submit">保存</button>
       <span class="hint">写入 ~/.light-github/config.json</span>
@@ -605,6 +608,7 @@ async function loadConfig() {
   $("#cf-token").value = c.token || "";
   $("#cf-refresh").value = c.refresh;
   $("#cf-level").value = c.logLevel;
+  $("#cf-autosys").checked = !!c.autoSysProxy;
 }
 $("#config-form").addEventListener("submit", async e => {
   e.preventDefault();
@@ -613,6 +617,7 @@ $("#config-form").addEventListener("submit", async e => {
   const body = {
     logLevel: $("#cf-level").value,
     refresh: $("#cf-refresh").value.trim(),
+    autoSysProxy: $("#cf-autosys").checked,
   };
   const addr = $("#cf-addr").value.trim(), token = $("#cf-token").value;
   if (addr && addr !== cur.addr) body.addr = addr;   // 未变更不提交（避免误触重启提示）

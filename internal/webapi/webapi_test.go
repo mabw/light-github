@@ -234,6 +234,36 @@ func TestConfig_GetAndPost(t *testing.T) {
 	}
 }
 
+// autoSysProxy 部分更新：提供即覆盖、落盘、回调可见；缺省不动现值
+func TestConfig_PostAutoSysProxy(t *testing.T) {
+	deps := newDeps(t, config.Config{Addr: "127.0.0.1:12800", Refresh: time.Hour, LogLevel: "info"})
+	deps.ConfigPath = t.TempDir() + "/config.json"
+	var applied config.Config
+	deps.OnConfigChange = func(c config.Config) { applied = c }
+
+	srv := httptest.NewServer(Handler(deps))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/api/config", "application/json",
+		stringReader(`{"autoSysProxy":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if resp.StatusCode != 200 || body["success"] != true {
+		t.Fatalf("POST autoSysProxy: %d %v", resp.StatusCode, body)
+	}
+	if !applied.AutoSysProxy {
+		t.Fatalf("回调应收 true: %+v", applied)
+	}
+	saved, err := config.Load(deps.ConfigPath)
+	if err != nil || !saved.AutoSysProxy {
+		t.Fatalf("应写回文件: %+v err=%v", saved, err)
+	}
+}
+
 // Token 非空（非 loopback 场景）时 /api/* 必须带凭据
 func TestAPI_RequiresTokenWhenConfigured(t *testing.T) {
 	deps := newDeps(t, config.Config{})

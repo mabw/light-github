@@ -138,3 +138,28 @@ func TestRefresh_UnmarshalCompat(t *testing.T) {
 		t.Fatalf("字符串格式应支持: %+v err=%v", cfg2, err)
 	}
 }
+
+// AutoSysProxy：默认 false（安全取向——未明确开启不自动改系统设置）；
+// 序列化字段名 autoSysProxy，与 UI/文件其余字段约定一致。
+func TestAutoSysProxy_RoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Save(path, Config{Addr: "a", Refresh: time.Hour, LogLevel: "info", AutoSysProxy: true}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	if !strings.Contains(string(b), `"autoSysProxy": true`) {
+		t.Fatalf("应输出 autoSysProxy 字段: %s", b)
+	}
+	cfg, err := Load(path)
+	if err != nil || !cfg.AutoSysProxy {
+		t.Fatalf("读回应为 true: %+v err=%v", cfg, err)
+	}
+
+	// 缺字段（旧配置文件）→ false
+	legacy := filepath.Join(t.TempDir(), "legacy.json")
+	_ = os.WriteFile(legacy, []byte(`{"addr":"a","refresh":"1h0m0s","logLevel":"info"}`), 0o600)
+	cfg2, err := Load(legacy)
+	if err != nil || cfg2.AutoSysProxy {
+		t.Fatalf("旧文件缺字段应为 false: %+v err=%v", cfg2, err)
+	}
+}

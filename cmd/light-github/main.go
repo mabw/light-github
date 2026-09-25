@@ -214,9 +214,13 @@ func main() {
 		Config:     cfg,
 		ConfigPath: cfgPath,
 		OnConfigChange: func(c config.Config) {
-			cfg = c // logLevel/refresh 热应用；addr/token 由 UI 提示重启
+			cfg = c // logLevel/refresh/autoSysProxy 热应用；addr/token 由 UI 提示重启
 			logs.SetLevel(parseLevel(c.LogLevel))
 			refreshEvery.Store(int64(c.Refresh))
+			// AutoSysProxy 开启即接入；关闭仅影响下次启动（断开走显式操作，不反向改系统）
+			if c.AutoSysProxy && !sysproxy.Enabled(pacURL) {
+				_ = setSysProxy(true)
+			}
 			log.Info("配置已热应用", "logLevel", c.LogLevel, "refresh", c.Refresh.String())
 		},
 		RefreshRules: func(ctx context.Context) (int, error) {
@@ -252,6 +256,12 @@ func main() {
 	log.Info("light-github 已启动",
 		"addr", listenAddr.String(), "ui", "http://"+listenAddr.String(),
 		"token", tokenState(cfg.Token), "level", cfg.LogLevel)
+
+	// AutoSysProxy 持久开关：启动即恢复 PAC 接入（默认 off 不动系统设置；
+	// 退出时统一还原，故每次启动重接一次是预期行为）
+	if cfg.AutoSysProxy && !sysproxy.Enabled(pacURL) {
+		_ = setSysProxy(true)
+	}
 
 	printOnboarding(listenAddr.String())
 

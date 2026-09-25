@@ -318,10 +318,11 @@ func (d Deps) handleConfig(w http.ResponseWriter, r *http.Request) {
 // postConfig 部分更新：请求中出现的字段覆盖现值，其余保留；合法即落盘并回调热应用。
 func (d Deps) postConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Addr     *string `json:"addr"`
-		Token    *string `json:"token"`
-		Refresh  *string `json:"refresh"`
-		LogLevel *string `json:"logLevel"`
+		Addr         *string `json:"addr"`
+		Token        *string `json:"token"`
+		Refresh      *string `json:"refresh"`
+		LogLevel     *string `json:"logLevel"`
+		AutoSysProxy *bool   `json:"autoSysProxy"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, envelope{Error: "body 解析失败"})
@@ -355,6 +356,9 @@ func (d Deps) postConfig(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, envelope{Error: "logLevel 须为 debug/info/warn/error"})
 			return
 		}
+	}
+	if req.AutoSysProxy != nil {
+		next.AutoSysProxy = *req.AutoSysProxy
 	}
 
 	if d.ConfigPath != "" {
