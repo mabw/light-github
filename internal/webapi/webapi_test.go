@@ -332,3 +332,41 @@ func TestProbeDomain(t *testing.T) {
 		t.Fatal("应返回候选列表")
 	}
 }
+
+// 加速开关端点：POST 切换，status 反映当前状态
+func TestAccelToggle(t *testing.T) {
+	deps := newDeps(t, config.Config{})
+	state := true
+	deps.AccelEnabled = func() bool { return state }
+	deps.SetAccel = func(on bool) { state = on }
+
+	srv := httptest.NewServer(Handler(deps))
+	defer srv.Close()
+
+	// status 初始 accelerating=true
+	_, body := get(t, srv.URL+"/api/status")
+	if body["data"].(map[string]any)["accelerating"] != true {
+		t.Fatalf("初始应加速中: %v", body)
+	}
+
+	// 切换关闭
+	resp, err := http.Post(srv.URL+"/api/accel", "application/json", stringReader(`{"on":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b2 map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&b2)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || b2["success"] != true || b2["data"].(map[string]any)["accelerating"] != false {
+		t.Fatalf("切换: %d %v", resp.StatusCode, b2)
+	}
+	if state {
+		t.Fatal("回调应已切换")
+	}
+
+	// status 反映
+	_, body3 := get(t, srv.URL+"/api/status")
+	if body3["data"].(map[string]any)["accelerating"] != false {
+		t.Fatalf("status 应反映关闭: %v", body3)
+	}
+}

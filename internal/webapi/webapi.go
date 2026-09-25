@@ -43,6 +43,10 @@ type Deps struct {
 	OnConfigChange func(config.Config)
 	// RefreshRules 手动触发规则刷新，返回新规则数
 	RefreshRules func(ctx context.Context) (int, error)
+
+	// 加速开关（托盘与控制台共用）；nil 时端点 503、status 报告 true
+	SetAccel     func(on bool)
+	AccelEnabled func() bool
 }
 
 // envelope 统一响应信封（全局 API 规范：success/data/error）。
@@ -63,6 +67,7 @@ func Handler(d *Deps) http.Handler {
 	mux.HandleFunc("/api/rules/refresh", d.handleRefresh)
 	mux.HandleFunc("/api/rules/probe", d.handleProbe)
 	mux.HandleFunc("/api/config", d.handleConfig)
+	mux.HandleFunc("/api/accel", d.handleAccel)
 	mux.HandleFunc("/pac", d.handlePAC)
 	mux.Handle("/", webui.Handler()) // 兜底：控制台单页
 	return d.auth(mux)
@@ -102,14 +107,19 @@ func (d Deps) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if d.Rules != nil {
 		ruleCount = len(d.Rules())
 	}
+	accelerating := true
+	if d.AccelEnabled != nil {
+		accelerating = d.AccelEnabled()
+	}
 	writeJSON(w, http.StatusOK, envelope{Success: true, Data: map[string]any{
-		"version":     d.Version,
-		"uptime":      time.Since(d.StartedAt).String(),
-		"addr":        d.Addr,
-		"ruleCount":   ruleCount,
-		"lastRefresh": src.LastRefreshAt.Format(time.RFC3339),
-		"lastOk":      src.LastOK,
-		"sources":     src.Sources,
+		"version":      d.Version,
+		"uptime":       time.Since(d.StartedAt).String(),
+		"addr":         d.Addr,
+		"ruleCount":    ruleCount,
+		"accelerating": accelerating,
+		"lastRefresh":  src.LastRefreshAt.Format(time.RFC3339),
+		"lastOk":       src.LastOK,
+		"sources":      src.Sources,
 	}})
 }
 
@@ -201,6 +211,28 @@ func (d Deps) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, envelope{Success: true, Data: map[string]any{"count": count}})
+}
+
+// handleAccel 加速开关：POST {"on":bool}。关闭后白名单直通、端口与观测保持，
+// 配置的代理/PAC 不悬空（托盘「关闭加速」同一入口）。
+func (d Deps) handleAccel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, envelope{Error: "method"})
+		return
+	}
+	if d.SetAccel == nil || d.AccelEnabled == nil {
+		writeJSON(w, http.StatusServiceUnavailable, envelope{Error: "加速开关未接入"})
+		return
+	}
+	var req struct {
+		On *bool `json:"on"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&req); err != nil || req.On == nil {
+		writeJSON(w, http.StatusBadRequest, envelope{Error: `body 须为 {"on":bool}`})
+		return
+	}
+	d.SetAccel(*req.On)
+	writeJSON(w, http.StatusOK, envelope{Success: true, Data: map[string]any{"accelerating": d.AccelEnabled()}})
 }
 
 // handleProbe 单域名强制重测（忽略测速缓存；规则页行内测速按钮）。

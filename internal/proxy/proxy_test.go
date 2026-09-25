@@ -406,3 +406,60 @@ func TestProxy_NilWebStill400(t *testing.T) {
 		t.Fatalf("nil Web 应保持 400: %d", resp.StatusCode)
 	}
 }
+
+// ---- 加速开关：关闭后白名单域名也直通（端口/观测保持可用） ----
+
+func TestSetEnabled_DisabledAcceleratesNothing(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Connection", "close")
+		_, _ = w.Write([]byte("direct-ok"))
+	}))
+	t.Cleanup(upstream.Close)
+	// 直通目标即上游本身（127.0.0.1，不在规则表时也直通；本用例验证"关闭后规则形同虚设"）
+	proxySrv := &Server{
+		Addr:  "127.0.0.1:0",
+		Table: rule.NewTable([]rule.Rule{{Domain: "accel.test", Kind: rule.KindDynamic}}),
+		Dialer: &fakeDialer{ips: []net.IP{net.ParseIP("240.0.0.1")}}, // 若走选路必失败（保留地址）
+		Metrics:     metrics.NewStore(time.Second),
+		DialTimeout: 300 * time.Millisecond,
+	}
+	addr, err := proxySrv.ListenAndServe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = proxySrv.Close() })
+
+	client := &http.Client{Transport: &http.Transport{
+		Proxy:           http.ProxyURL(&url.URL{Scheme: "http", Host: addr.String()}),
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // 测试
+	}, Timeout: 5 * time.Second}
+
+	// 开启状态：白名单走选路（240.0.0.1 必失败）
+	if _, err := client.Get("https://accel.test/"); err == nil {
+		t.Fatal("前置条件：开启时白名单应走选路（此处必失败）")
+	}
+
+	// 关闭加速：同域名直通 → 可达上游（直连 accel.test 解析失败？——直通拨原 host 也可能失败，
+	// 改用可解析目标验证直通路径）
+	proxySrv.SetEnabled(false)
+
+	// 用 127.0.0.1 直通目标（不在规则表）确认直通可用
+	resp, err := client.Get(upstream.URL)
+	if err != nil {
+		t.Fatalf("关闭后普通直通应可用: %v", err)
+	}
+	resp.Body.Close()
+
+	// 白名单域名关闭后不再触发选路（拨号失败与否不管，关键是 picks 不变）
+	before := proxySrv.Dialer.(*fakeDialer).picks
+	_, _ = client.Get("https://accel.test/")
+	if got := proxySrv.Dialer.(*fakeDialer).picks; got != before {
+		t.Fatalf("关闭后白名单不应触发选路: %d → %d", before, got)
+	}
+
+	// 重新开启：恢复加速
+	proxySrv.SetEnabled(true)
+	if _, err := client.Get("https://accel.test/"); err == nil {
+		t.Fatal("重新开启后应恢复走选路（必失败）")
+	}
+}

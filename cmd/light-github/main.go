@@ -174,6 +174,15 @@ func main() {
 			applyRules(newRules)
 			return len(newRules), nil
 		},
+		SetAccel: func(on bool) {
+			srv.SetEnabled(on)
+			if on {
+				log.Info("加速已开启")
+			} else {
+				log.Warn("加速已关闭（全部直通；端口与观测保持可用）")
+			}
+		},
+		AccelEnabled: func() bool { return srv.Enabled() },
 	}
 
 	// 代理（与控制台共用端口：CONNECT→隧道；origin-form→Web）

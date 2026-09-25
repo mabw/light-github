@@ -81,10 +81,19 @@ type Server struct {
 	Token       string        // 非空时 CONNECT 必须携带 Proxy-Authorization: Bearer（DEBT-6）
 	Web         http.Handler  // M2-5 端口复用：origin-form 请求（控制台/API）交给它；nil 则一律 400
 
+	passthrough atomic.Bool // true = 加速关闭（白名单也直通）；零值 false = 默认加速开启
+
 	mu    sync.RWMutex
 	table *rule.Table
 	ln    net.Listener
 }
+
+// SetEnabled 加速开关（托盘/控制台共用）。关闭后白名单失效、全部直通——
+// 端口与观测保持可用，已配置的代理/PAC 不悬空；随时可重新开启。
+func (s *Server) SetEnabled(on bool) { s.passthrough.Store(!on) }
+
+// Enabled 当前加速是否开启。
+func (s *Server) Enabled() bool { return !s.passthrough.Load() }
 
 // SetTable 原子替换规则表（数据源定时刷新用）。
 func (s *Server) SetTable(t *rule.Table) {
@@ -168,13 +177,13 @@ func (s *Server) handleConnect(ctx context.Context, cancel context.CancelFunc, c
 	}
 	start := time.Now()
 
-	// 出站拨号：白名单 → 逐候选尝试；其余 → 直通原目标
+	// 出站拨号：白名单且加速开启 → 逐候选尝试；其余 → 直通原目标
 	var (
 		upstream net.Conn
 		via      string
 		usedIP   net.IP
 	)
-	if _, accelerated := s.currentTable().Match(domain); accelerated {
+	if _, accelerated := s.currentTable().Match(domain); accelerated && !s.passthrough.Load() {
 		via = "accel"
 		ips, perr := s.Dialer.Pick(ctx, domain)
 		if perr == nil {
