@@ -53,8 +53,8 @@ func TestRing_TruncatesToCapacity(t *testing.T) {
 	if len(es) != 3 {
 		t.Fatalf("容量 3 应截断为 3 条, got %d", len(es))
 	}
-	// 最新在前：i=4,3,2；i=0,1 被挤出
-	if es[0].Attrs["i"] != 4 || es[2].Attrs["i"] != 2 {
+	// 最新在前：i=4,3,2；i=0,1 被挤出（slog 数值统一为 int64）
+	if es[0].Attrs["i"] != int64(4) || es[2].Attrs["i"] != int64(2) {
 		t.Fatalf("应保留最新 3 条: %v", es)
 	}
 }
@@ -145,7 +145,7 @@ func TestRecent_LimitAndUnknownKind(t *testing.T) {
 		m.App().Info("m", "i", i)
 	}
 
-	if es := m.Recent(KindApp, 2); len(es) != 2 || es[0].Attrs["i"] != 4 {
+	if es := m.Recent(KindApp, 2); len(es) != 2 || es[0].Attrs["i"] != int64(4) {
 		t.Fatalf("n=2 应只返回最新 2 条: %+v", es)
 	}
 	if es := m.Recent("bogus", 10); len(es) != 0 {
