@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,10 +26,10 @@ import (
 )
 
 const (
-	defaultAddr         = "127.0.0.1:12800"
-	defaultRefresh      = time.Hour // 数据源刷新周期（克制：≥1h，见 DESIGN.md §3.3）
-	steamppAPI          = "https://api.steampp.net/accelerator/projectgroups"
-	github520HostsJSON  = "https://raw.hellogithub.com/hosts.json"
+	defaultAddr        = "127.0.0.1:12800"
+	defaultRefresh     = time.Hour // 数据源刷新周期（克制：≥1h，见 DESIGN.md §3.3）
+	steamppAPI         = "https://api.steampp.net/accelerator/projectgroups"
+	github520HostsJSON = "https://raw.hellogithub.com/hosts.json"
 )
 
 func main() {
@@ -63,6 +64,19 @@ func main() {
 
 	// 选择器：DoH 多端点解析 + TCP 中位测速 + 失败沉底
 	sel := selector.New(table, doh.New(), &selector.MedianProber{}, 5*time.Minute)
+
+	// DEBT-3：后台预热白名单域名测速缓存（首请求不再同步测速）。
+	// 通配规则（*.suffix）以去前缀的裸域近似预热。
+	preloadDomains := make([]string, 0, len(rules))
+	seen := map[string]bool{}
+	for _, r := range rules {
+		d := strings.TrimPrefix(r.Domain, "*.")
+		if d != "" && !seen[d] {
+			seen[d] = true
+			preloadDomains = append(preloadDomains, d)
+		}
+	}
+	go sel.Preload(ctx, preloadDomains, 4)
 
 	// 代理 + 指标
 	store := metrics.NewStore(5 * time.Second)

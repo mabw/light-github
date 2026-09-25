@@ -7,6 +7,9 @@
 //
 // 失败统计借鉴 dev-sidecar 的 DynamicChoice：连续失败达阈值的 IP 沉底（不删除，
 // 保留为最后候选），连接成功即重置计数。
+//
+// 并发模型（DEBT-4）：锁按域名分片——states map 仅短锁取 state，测速等网络 IO
+// 在 state 级锁内进行，不同域名的 Pick 互不阻塞。
 package selector
 
 import (
@@ -36,10 +39,11 @@ type Prober interface {
 type candidate struct {
 	ip      net.IP
 	cost    time.Duration // 测速中位耗时
-	failure int           // 连续失败次数（内存态，不随缓存过期重置语义）
+	failure int           // 连续失败次数
 }
 
 type domainState struct {
+	mu         sync.Mutex // DEBT-4：域名级分片锁（测速期间仅阻塞同域名）
 	probedAt   time.Time
 	candidates []candidate
 }
@@ -51,7 +55,7 @@ type Selector struct {
 	prober   Prober
 	ttl      time.Duration
 
-	mu     sync.Mutex
+	mu     sync.Mutex // 仅保护 states map 的读写
 	states map[string]*domainState
 }
 
@@ -66,27 +70,35 @@ func New(tbl *rule.Table, resolver Resolver, prober Prober, cacheTTL time.Durati
 	}
 }
 
+// stateFor 取或建域名的分片状态（map 短锁）
+func (s *Selector) stateFor(domain string) *domainState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.states[domain]
+	if !ok {
+		st = &domainState{}
+		s.states[domain] = st
+	}
+	return st
+}
+
 // Pick 返回 domain 的出口候选 IP（按优先级排序，拨号方逐个尝试）。
 // 测速结果缓存至 TTL 过期；连续失败的 IP 沉底。
 func (s *Selector) Pick(ctx context.Context, domain string) ([]net.IP, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	st := s.stateFor(domain)
+	st.mu.Lock()
+	defer st.mu.Unlock()
 
-	state, ok := s.states[domain]
-	if !ok || time.Since(state.probedAt) >= s.ttl {
-		cands, err := s.buildCandidates(ctx, domain, state)
+	if st.probedAt.IsZero() || time.Since(st.probedAt) >= s.ttl {
+		cands, err := s.buildCandidates(ctx, domain, st)
 		if err != nil && len(cands) == 0 {
 			return nil, err
 		}
-		if state == nil {
-			state = &domainState{}
-			s.states[domain] = state
-		}
-		state.candidates, state.probedAt = cands, time.Now()
+		st.candidates, st.probedAt = cands, time.Now()
 	}
 
-	ordered := make([]candidate, len(state.candidates))
-	copy(ordered, state.candidates)
+	ordered := make([]candidate, len(st.candidates))
+	copy(ordered, st.candidates)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		si, sj := sinkRank(ordered[i]), sinkRank(ordered[j])
 		if si != sj {
@@ -102,45 +114,67 @@ func (s *Selector) Pick(ctx context.Context, domain string) ([]net.IP, error) {
 	return ips, nil
 }
 
+// Preload 并发预热域名测速缓存（DEBT-3：让首请求命中缓存而非同步测速）。
+// concurrency 限制对 DoH 端点与目标网络的并发压力，默认 4。
+func (s *Selector) Preload(ctx context.Context, domains []string, concurrency int) {
+	if concurrency <= 0 {
+		concurrency = 4
+	}
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	for _, d := range domains {
+		wg.Add(1)
+		go func(domain string) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+			_, _ = s.Pick(ctx, domain)
+		}(d)
+	}
+	wg.Wait()
+}
+
 // ReportFailure 上报某 IP 连接失败（连续失败达阈值后沉底）。
 func (s *Selector) ReportFailure(domain string, ip net.IP) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if c, ok := s.findCandidate(domain, ip); ok {
+	st := s.stateFor(domain)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if c := findCandidate(st.candidates, ip); c != nil {
 		c.failure++
 	}
 }
 
 // ReportSuccess 上报连接成功（重置失败计数）。
 func (s *Selector) ReportSuccess(domain string, ip net.IP) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if c, ok := s.findCandidate(domain, ip); ok {
+	st := s.stateFor(domain)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if c := findCandidate(st.candidates, ip); c != nil {
 		c.failure = 0
 	}
 }
 
-func (s *Selector) findCandidate(domain string, ip net.IP) (*candidate, bool) {
-	state, ok := s.states[domain]
-	if !ok {
-		return nil, false
-	}
-	for i := range state.candidates {
-		if state.candidates[i].ip.Equal(ip) {
-			return &state.candidates[i], true
+func findCandidate(cands []candidate, ip net.IP) *candidate {
+	for i := range cands {
+		if cands[i].ip.Equal(ip) {
+			return &cands[i]
 		}
 	}
-	return nil, false
+	return nil
 }
 
 // buildCandidates 生成候选集并测速；resolver 失败但存在历史候选时沿用旧候选。
-func (s *Selector) buildCandidates(ctx context.Context, domain string, prev *domainState) ([]candidate, error) {
+func (s *Selector) buildCandidates(ctx context.Context, domain string, st *domainState) ([]candidate, error) {
 	ips, resolveErr := s.candidateIPs(ctx, domain)
 
 	// resolve 失败：有旧候选则降级沿用（DoH 短暂抖动不应击穿缓存）
 	if resolveErr != nil {
-		if prev != nil && len(prev.candidates) > 0 {
-			return prev.candidates, nil
+		if len(st.candidates) > 0 {
+			return st.candidates, nil
 		}
 		return nil, resolveErr
 	}
@@ -168,11 +202,9 @@ func (s *Selector) buildCandidates(ctx context.Context, domain string, prev *dom
 	wg.Wait()
 
 	// 沿用历史失败计数（测速刷新不应清零运行期失败记忆）
-	if prev != nil {
-		for i := range cands {
-			if old, ok := s.findIn(prev.candidates, cands[i].ip); ok {
-				cands[i].failure = old.failure
-			}
+	for i := range cands {
+		if old := findCandidate(st.candidates, cands[i].ip); old != nil {
+			cands[i].failure = old.failure
 		}
 	}
 	return cands, nil
@@ -201,15 +233,6 @@ func (s *Selector) candidateIPs(ctx context.Context, domain string) ([]net.IP, e
 		return nil, fmt.Errorf("selector: no usable candidates for %s (via %s)", domain, query)
 	}
 	return ips, nil
-}
-
-func (s *Selector) findIn(cands []candidate, ip net.IP) (candidate, bool) {
-	for _, c := range cands {
-		if c.ip.Equal(ip) {
-			return c, true
-		}
-	}
-	return candidate{}, false
 }
 
 func sinkRank(c candidate) int {

@@ -134,7 +134,7 @@ func TestPick_CachesProbeWithinTTL(t *testing.T) {
 		t.Fatal(err)
 	}
 	if prober.calls.Load() != first {
-		t.Fatalf("TTL 内二次 Pick 不应重复测速: first=%d now=%d", first, prober.calls)
+		t.Fatalf("TTL 内二次 Pick 不应重复测速: first=%d now=%d", first, prober.calls.Load())
 	}
 }
 
@@ -195,5 +195,85 @@ func TestPick_NoCandidatesReturnsError(t *testing.T) {
 
 	if _, err := s.Pick(context.Background(), "x.com"); err == nil {
 		t.Fatal("无任何候选应返回错误")
+	}
+}
+
+// 按域名映射的 resolver（DEBT-4 测试需要）
+type domainResolver struct {
+	byDomain map[string][]net.IP
+}
+
+func (d *domainResolver) Resolve(_ context.Context, domain string) ([]net.IP, error) {
+	return d.byDomain[domain], nil
+}
+
+// blockingProber 真实阻塞的探针（fakeProber 即时返回耗时值，无法验证锁行为）
+type blockingProber struct {
+	delay map[string]time.Duration
+	calls atomic.Int64
+}
+
+func (b *blockingProber) Probe(_ context.Context, ip net.IP) time.Duration {
+	b.calls.Add(1)
+	if d, ok := b.delay[ip.String()]; ok {
+		time.Sleep(d)
+		return d
+	}
+	return time.Millisecond
+}
+
+// DEBT-4：域名 A 测速期间（真阻塞 prober），域名 B 的 Pick 不应被全局锁阻塞
+func TestPick_DifferentDomainsDoNotBlockEachOther(t *testing.T) {
+	res := &domainResolver{byDomain: map[string][]net.IP{
+		"slow.test": {ip("1.1.1.1")},
+		"fast.test": {ip("2.2.2.2")},
+	}}
+	prober := &blockingProber{delay: map[string]time.Duration{
+		"1.1.1.1": 300 * time.Millisecond, // slow.test 候选：真实阻塞 300ms
+	}}
+	tbl := rule.NewTable([]rule.Rule{{Domain: "slow.test", Kind: rule.KindDynamic}, {Domain: "fast.test", Kind: rule.KindDynamic}})
+	s := New(tbl, res, prober, 5*time.Minute)
+
+	doneSlow := make(chan time.Time, 1)
+	doneFast := make(chan time.Time, 1)
+	errCh := make(chan error, 2)
+	start := time.Now()
+	go func() { _, err := s.Pick(context.Background(), "slow.test"); errCh <- err; doneSlow <- time.Now() }()
+	time.Sleep(30 * time.Millisecond) // 确保 slow 已进入测速（持锁）
+	go func() { _, err := s.Pick(context.Background(), "fast.test"); errCh <- err; doneFast <- time.Now() }()
+
+	fastAt := <-doneFast
+	slowAt := <-doneSlow
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("Pick 不应出错: %v", err)
+		}
+	}
+	if fastAt.Sub(start) >= slowAt.Sub(start) {
+		t.Fatalf("fast 域名不应被 slow 域名的测速阻塞: fast=%v slow=%v proberCalls=%d",
+			fastAt.Sub(start), slowAt.Sub(start), prober.calls.Load())
+	}
+}
+
+// DEBT-3：Preload 后续 Pick 应直接命中缓存不再测速
+func TestSelector_PreloadFillsCache(t *testing.T) {
+	res := &domainResolver{byDomain: map[string][]net.IP{
+		"a.test": {ip("1.1.1.1")},
+	}}
+	prober := &fakeProber{}
+	tbl := rule.NewTable([]rule.Rule{{Domain: "a.test", Kind: rule.KindDynamic}})
+	s := New(tbl, res, prober, 5*time.Minute)
+
+	s.Preload(context.Background(), []string{"a.test"}, 2)
+	afterPreload := prober.calls.Load()
+
+	if _, err := s.Pick(context.Background(), "a.test"); err != nil {
+		t.Fatal(err)
+	}
+	if prober.calls.Load() != afterPreload {
+		t.Fatalf("预热后 Pick 不应再次测速: preload=%d now=%d", afterPreload, prober.calls.Load())
+	}
+	if afterPreload == 0 {
+		t.Fatal("预热本身应触发测速")
 	}
 }
