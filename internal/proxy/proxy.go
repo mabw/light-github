@@ -96,6 +96,14 @@ type Server struct {
 	ln    net.Listener
 }
 
+// fastDialCandidates/fastDialTimeout 分级拨号超时（M5-3）：前 N 个候选用
+// 快速档（与 DialTimeout 取小）——封锁期黑洞 IP 快速跳过，全程最坏耗时
+// 从 候选数×5s 量级压到秒级（断网实测曾 150s）。
+const (
+	fastDialCandidates = 2
+	fastDialTimeout    = 2500 * time.Millisecond
+)
+
 // SetEnabled 加速开关（托盘/控制台共用）。关闭后白名单失效、全部直通——
 // 端口与观测保持可用，已配置的代理/PAC 不悬空；随时可重新开启。
 func (s *Server) SetEnabled(on bool) { s.passthrough.Store(!on) }
@@ -212,10 +220,15 @@ func (s *Server) handleConnect(ctx context.Context, cancel context.CancelFunc, c
 			dialErr = perr
 		}
 		var d net.Dialer
-		d.Timeout = s.dialTimeout()
-		for _, ip := range ips {
+		for i, ip := range ips {
 			if ctx.Err() != nil {
 				break // 客户端已断开，停止尝试后续候选
+			}
+			d.Timeout = s.dialTimeout()
+			if i < fastDialCandidates {
+				if fast := min(s.dialTimeout(), fastDialTimeout); fast > 0 {
+					d.Timeout = fast
+				}
 			}
 			conn, derr := d.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
 			if derr == nil {

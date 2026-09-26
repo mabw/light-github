@@ -483,3 +483,31 @@ func TestListenAndServe_RejectsNonLoopbackWithoutToken(t *testing.T) {
 		t.Fatal("应返回监听地址")
 	}
 }
+
+// M5-3：前 2 候选用快速超时档——封锁期死 IP（黑洞丢包型）不拖慢整体拨号。
+// DialTimeout 完整档 4s，首候选分级档应显著低于 4s。
+func TestProxy_FirstCandidatesFailFast(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(upstream.Close)
+	_, upPort, _ := net.SplitHostPort(upstream.Listener.Addr().String())
+
+	dialer := &fakeDialer{ips: []net.IP{net.ParseIP("240.0.0.1"), net.ParseIP("127.0.0.1")}}
+	proxyURL, srv := newStack(t, dialer)
+	srv.DialTimeout = 4 * time.Second // 完整档 4s；分级档应 ~2.5s
+
+	start := time.Now()
+	resp, err := proxiedClient(t, proxyURL).Get("https://accel.test:" + upPort + "/")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("应回退到第二候选成功: %d", resp.StatusCode)
+	}
+	// 修复前：首候选吃满完整档 4s；修复后分级档 ~2.5s。留容差断言 < 3.5s。
+	if el := time.Since(start); el >= 3500*time.Millisecond {
+		t.Fatalf("首候选应走快速超时档，实际总耗时 %v", el)
+	}
+}
