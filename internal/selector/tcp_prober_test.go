@@ -107,3 +107,39 @@ func TestMedianProber_App404StillAlive(t *testing.T) {
 		t.Fatalf("404 是服务中（无此资源），不应惩罚: %v", cost)
 	}
 }
+
+// M5-10：GitHub 边缘健康节点（实测 140.82.114.22）——TLS 泛证书握手合法、
+// 任意路径秒回 200 text/plain "OK"、无路由层头。只看状态码会把它判为
+// 最优候选（响应最快），流量全打到它 → 浏览器每个页面都是裸 "OK"。
+// 200 + 裸 text/plain 判死。
+func TestMedianProber_HealthEndpointRejected(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("OK")) // 2026-09-26 实测 140.82.114.22 对任意路径的响应
+	}))
+	t.Cleanup(srv.Close)
+	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+
+	p := &MedianProber{Count: 1, Timeout: 300 * time.Millisecond, Port: port}
+	cost := p.Probe(context.Background(), "example.com", net.ParseIP(host))
+	if cost != 300*time.Millisecond {
+		t.Fatalf("200 text/plain 健康节点应按超时值惩罚: %v", cost)
+	}
+}
+
+// 200 + application/json 是正常服务（api.github.com 对 GET / 返回小 JSON），
+// 不得被 text/plain 判定误伤
+func TestMedianProber_App200JSONStillAlive(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"current_user_url":"https://api.github.com/user"}`))
+	}))
+	t.Cleanup(srv.Close)
+	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+
+	p := &MedianProber{Count: 1, Timeout: 300 * time.Millisecond, Port: port}
+	cost := p.Probe(context.Background(), "example.com", net.ParseIP(host))
+	if cost >= 300*time.Millisecond {
+		t.Fatalf("200 JSON 是正常 API 服务，不应惩罚: %v", cost)
+	}
+}

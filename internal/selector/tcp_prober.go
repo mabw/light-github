@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -118,5 +119,16 @@ func (p *MedianProber) httpOK(ctx context.Context, domain string, ip net.IP, por
 		return false
 	}
 	defer resp.Body.Close()
+
+	// 健康节点指纹（M5-10）：GitHub 边缘存在独立健康服务（实测 140.82.114.22，
+	// 2026-09-26「页面只返回一个 ok」的元凶）——*.github.com 泛证书握手合法、
+	// 任意路径秒回 200 text/plain "OK"、无路由层头（x-github-request-id）。
+	// 只看状态码会把它判为最优候选（响应最快、cost 最低），流量全打到它。
+	// 加速域的正常服务没有 200 裸 text/plain 形态（GitHub 系 html/json、
+	// registry json、404 资产域不在此列），故该指纹判死。
+	if resp.StatusCode == http.StatusOK &&
+		strings.HasPrefix(strings.TrimSpace(resp.Header.Get("Content-Type")), "text/plain") {
+		return false
+	}
 	return resp.StatusCode < 500 && resp.StatusCode != http.StatusBadRequest
 }
