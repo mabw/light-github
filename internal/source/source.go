@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/marvin/light-github/internal/rule"
+	"github.com/mabw/light-github/internal/rule"
 )
 
 // 与官方客户端一致的请求特征（ApiConstants.GetReferrer 格式），保持克制频率（≥1h）

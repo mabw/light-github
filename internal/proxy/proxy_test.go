@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/marvin/light-github/internal/metrics"
-	"github.com/marvin/light-github/internal/rule"
+	"github.com/mabw/light-github/internal/metrics"
+	"github.com/mabw/light-github/internal/rule"
 )
 
 // ---- 测试替身 ----

@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/marvin/light-github/internal/rule"
+	"github.com/mabw/light-github/internal/rule"
 )
 
 // ---- steampp 源解析（fixture 复刻真实结构：emoji 顶层键 + 混合类型） ----

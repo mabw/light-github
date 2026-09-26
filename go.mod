@@ -1,4 +1,4 @@
-module github.com/marvin/light-github
+module github.com/mabw/light-github
 
 go 1.27
 

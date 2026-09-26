@@ -14,13 +14,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/marvin/light-github/internal/config"
-	"github.com/marvin/light-github/internal/logx"
-	"github.com/marvin/light-github/internal/metrics"
-	"github.com/marvin/light-github/internal/rule"
-	"github.com/marvin/light-github/internal/selector"
-	"github.com/marvin/light-github/internal/source"
-	"github.com/marvin/light-github/internal/webui"
+	"github.com/mabw/light-github/internal/config"
+	"github.com/mabw/light-github/internal/logx"
+	"github.com/mabw/light-github/internal/metrics"
+	"github.com/mabw/light-github/internal/rule"
+	"github.com/mabw/light-github/internal/selector"
+	"github.com/mabw/light-github/internal/source"
+	"github.com/mabw/light-github/internal/webui"
 )
 
 // Deps 端点依赖（cmd 组装注入；函数字段为 nil 时对应操作返回 503）。

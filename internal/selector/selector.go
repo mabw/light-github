@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/marvin/light-github/internal/rule"
+	"github.com/mabw/light-github/internal/rule"
 )
 
 // sinkThreshold 连续失败达到此次数的候选沉底

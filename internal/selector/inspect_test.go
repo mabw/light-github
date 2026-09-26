@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/marvin/light-github/internal/rule"
+	"github.com/mabw/light-github/internal/rule"
 )
 
 // Pick 后 Inspect 暴露各域名的候选（IP/耗时/失败计数/沉底状态）

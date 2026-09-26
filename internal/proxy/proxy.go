@@ -15,8 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/marvin/light-github/internal/metrics"
-	"github.com/marvin/light-github/internal/rule"
+	"github.com/mabw/light-github/internal/metrics"
+	"github.com/mabw/light-github/internal/rule"
 )
 
 // logger 返回服务日志出口（Log 未注入时退到默认，保证 accept 异常可见——review H6）。
