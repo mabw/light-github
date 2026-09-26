@@ -60,7 +60,7 @@ func main() {
 
 	// 配置优先级：显式 flags > 配置文件 > 默认值
 	cfgPath := config.Path()
-	fileCfg, _ := config.Load(cfgPath) // 缺文件/坏 JSON 均降级默认（config 包内保证）
+	fileCfg, cfgErr := config.Load(cfgPath) // 缺文件静默默认；坏 JSON 降级默认但告警（M7）
 	explicit := map[string]any{}
 	flag.Visit(func(f *flag.Flag) {
 		switch f.Name {
@@ -91,6 +91,9 @@ func main() {
 	})
 	defer func() { _ = logs.Close() }()
 	log := logs.App()
+	if cfgErr != nil {
+		log.Warn("配置文件损坏，已降级默认值（用户此前的修改未生效）", "err", cfgErr)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -4,6 +4,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,7 +94,9 @@ func Path() string {
 	return filepath.Join(home, ".light-github", "config.json")
 }
 
-// Load 读取配置；缺文件或坏 JSON 均降级为默认值（配置问题不应阻断启动）。
+// Load 读取配置；缺文件返回默认值（非错误）；坏 JSON 返回默认值 + 错误
+// （review M7：配置损坏必须对调用方可见——静默回默认会让用户的全部
+// 修改悄悄丢失。启动策略由调用方决定：记日志后继续用默认值）。
 func Load(path string) (Config, error) {
 	cfg := defaults()
 
@@ -102,7 +105,7 @@ func Load(path string) (Config, error) {
 		return cfg, nil // 缺文件：默认值，非错误
 	}
 	if err := json.Unmarshal(b, &cfg); err != nil {
-		return defaults(), nil // 坏 JSON：降级默认（不打断启动，问题在 UI/日志可见）
+		return defaults(), fmt.Errorf("config: %s 解析失败（已降级默认值）: %w", path, err)
 	}
 
 	// 字段级兜底：半损文件（缺字段）不应产生零值

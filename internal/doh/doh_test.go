@@ -59,7 +59,9 @@ func TestResolve_FiltersUnusableIPs(t *testing.T) {
 	}
 }
 
-func TestResolve_UnionsAndDeduplicatesAcrossEndpoints(t *testing.T) {
+// review M3：按信任序采纳首个成功端点的答案——次端点即使返回
+// 额外/异常 IP 也不进候选池（并集会让被污染端点污染整个候选集）
+func TestResolve_TrustOrderPrefersFirstSuccessfulEndpoint(t *testing.T) {
 	a := newTestServer(t, 200, `{"Answer":[{"type":1,"data":"1.1.1.1"},{"type":1,"data":"2.2.2.2"}]}`)
 	b := newTestServer(t, 200, `{"Answer":[{"type":1,"data":"2.2.2.2"},{"type":1,"data":"3.3.3.3"}]}`)
 	c := New(a.URL, b.URL)
@@ -68,8 +70,8 @@ func TestResolve_UnionsAndDeduplicatesAcrossEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if len(ips) != 3 {
-		t.Fatalf("两端点并集去重应得 3 个 IP，得到 %v", ips)
+	if len(ips) != 2 || !ips[0].Equal(net.ParseIP("1.1.1.1")) || !ips[1].Equal(net.ParseIP("2.2.2.2")) {
+		t.Fatalf("应只采纳信任序第一端点的答案，得到 %v", ips)
 	}
 }
 

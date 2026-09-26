@@ -45,15 +45,15 @@ func TestLoadRoundTrip(t *testing.T) {
 	}
 }
 
-func TestLoad_BrokenJSONFallsBackToDefaults(t *testing.T) {
+func TestLoad_BrokenJSONFallsBackToDefaultsAndReports(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte(`{"addr": "broken`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("坏 JSON 应降级默认值（不阻断启动）: %v", err)
+	if err == nil {
+		t.Fatal("坏 JSON 应返回错误（M7：损坏须对调用方可见）")
 	}
 	if cfg.Addr != DefaultAddr {
 		t.Fatalf("坏 JSON 应回退默认: %+v", cfg)

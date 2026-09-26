@@ -261,7 +261,7 @@ func (d *Deps) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	count, err := d.RefreshRules(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusOK, envelope{Success: false, Error: err.Error()})
+		writeJSON(w, http.StatusInternalServerError, envelope{Success: false, Error: err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, envelope{Success: true, Data: map[string]any{"count": count}})
@@ -334,7 +334,7 @@ func (d *Deps) handleProbe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := d.Selector.Reprobe(r.Context(), domain); err != nil {
-		writeJSON(w, http.StatusOK, envelope{Success: false, Error: err.Error()})
+		writeJSON(w, http.StatusInternalServerError, envelope{Success: false, Error: err.Error()})
 		return
 	}
 	// 从 Inspect 快照中取该域名的最新状态（成功后必存在）

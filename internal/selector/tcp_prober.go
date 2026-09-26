@@ -34,7 +34,10 @@ func (p *MedianProber) Probe(ctx context.Context, ip net.IP) time.Duration {
 			return timeout
 		}
 		start := time.Now()
-		conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip.String(), port), timeout)
+		// DialContext 而非 DialTimeout（review N4）：ctx 取消时单次拨号立即中止，
+		// 不必等满超时窗口
+		var d net.Dialer
+		conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
 		if conn != nil {
 			_ = conn.Close()
 		}

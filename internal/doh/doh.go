@@ -52,40 +52,30 @@ type dohResp struct {
 	Answer []dohAnswer `json:"Answer"`
 }
 
-// Resolve 并发查询所有端点，返回去重后的公网 IPv4 并集；部分端点失败被容忍，
-// 全部失败返回错误。结果顺序为各端点响应到达顺序（先到先入）。
+// Resolve 并发查询所有端点（保延迟），但按端点信任序采纳**首个成功**者
+// 的答案（review M3：原取全端点并集，任一被污染端点的假 IP 都会进入
+// 候选池——TCP 测速只校验握手耗时无法识别身份）。失败降级到下一家，
+// 全部失败返回错误。端点顺序即信任序（cmd 构造时阿里/DNSPod 在前）。
 func (c *Client) Resolve(ctx context.Context, domain string) ([]net.IP, error) {
-	var (
-		mu    sync.Mutex
-		seen  = map[string]bool{}
-		union []net.IP
-		wg    sync.WaitGroup
-	)
-
-	for _, ep := range c.endpoints {
+	results := make([][]net.IP, len(c.endpoints))
+	var wg sync.WaitGroup
+	for i, ep := range c.endpoints {
 		wg.Add(1)
-		go func(ep string) {
+		go func(i int, ep string) {
 			defer wg.Done()
-			ips, err := c.queryOne(ctx, ep, domain)
-			if err != nil {
-				return // 单端点失败被容忍
+			if ips, err := c.queryOne(ctx, ep, domain); err == nil {
+				results[i] = ips
 			}
-			mu.Lock()
-			defer mu.Unlock()
-			for _, ip := range ips {
-				if k := ip.String(); !seen[k] {
-					seen[k] = true
-					union = append(union, ip)
-				}
-			}
-		}(ep)
+		}(i, ep)
 	}
 	wg.Wait()
 
-	if len(union) == 0 {
-		return nil, fmt.Errorf("doh: all endpoints failed for %s", domain)
+	for _, ips := range results { // 信任序采纳
+		if len(ips) > 0 {
+			return ips, nil
+		}
 	}
-	return union, nil
+	return nil, fmt.Errorf("doh: all endpoints failed for %s", domain)
 }
 
 // queryOne 查询单端点，只取公网 IPv4 A 记录
