@@ -199,6 +199,7 @@ type Rule struct {
 | **M3 平台层** ✅ 2026-09-26（macOS） | 托盘（octocat 图标/状态总闸/三开关菜单）+ 三平台自启 + `-no-tray` headless | macOS 全项实测（加速开关/PAC 接入还原/自启 plist/SIGTERM 与托盘退出清理闭环）；Windows/Linux 真机验证 → DEBT-8（M4） |
 | **M4 发布** ✅ 2026-09-26（v0.4.0） | goreleaser 四目标 + GitHub Actions（CI 双平台矩阵 + tag 发布）+ 安装文档 | [v0.4.0](https://github.com/mabw/light-github/releases/tag/v0.4.0) 四产物 + checksums；darwin amd64 用 `clang -arch` 交叉（Intel runner 已退役）；Windows/Linux 真机验证 → DEBT-7/8 |
 | **M5 稳定性** ✅ 2026-09-26（v0.5.0） | 选路 TLS 级验证 + 生命周期回收（首 10s/稳态 100s）+ 失败即时失效 + 拨号分级超时（前 2 候选 2.5s）+ DoH 缓存 + safego 协程防护 | 决策依据见 [RESEARCH-WATT-STABILITY.md](RESEARCH-WATT-STABILITY.md)；连带修复测速黑洞拨号 bug（单用例 225s→0.9s） |
+| **M5.1 封锁实战追加** ✅ 2026-09-26 | 同名 FixedIP 多源并集 + 借段兜底（同根域家族）+ 应用层测速验证（HEAD+响应码，"Whoa there!" 400 淘汰）+ 拨号上限 4 快速失败 + 重建冷却 5s + **深封锁直连兜底**（候选全灭退化为系统解析直连——实测封锁为新建连接高丢包，直连 TCP 硬扛优于代理快速 502，工具下界=直连） | 2026-09-26 两次真实封锁期驱动；Reprobe/SetTable 旁路冷却（冷却合入回归修复） |
 
 ### 6.1 M2 架构要点（2026-09-25 定稿实现）
 

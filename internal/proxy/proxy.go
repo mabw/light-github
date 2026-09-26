@@ -245,6 +245,24 @@ func (s *Server) handleConnect(ctx context.Context, cancel context.CancelFunc, c
 			dialErr = derr
 			s.Dialer.ReportFailure(domain, ip)
 		}
+
+		// M5-8 直连兜底：候选全灭（深封锁期）时退化为系统解析直连原目标。
+		// 2026-09-26 实测封锁为「新建连接高丢包」而非全断——浏览器直连靠
+		// TCP 重传硬扛仍可开页（10s 级），远优于代理快速 502（用户实测
+		// 「关代理反而快」的机制根源）；候选经 dirty+冷却重测复活后，
+		// 后续连接自然回到加速。SNI 干扰期直连同挂（无恶化，仍 502）。
+		// 注：封锁期每请求仍先经历候选快速失败（最坏 ~15s）才兜底——
+		// 若实际体验不佳，下一步可加「近期兜底记忆」直接跳过候选。
+		if upstream == nil && ctx.Err() == nil {
+			var d net.Dialer
+			d.Timeout = s.dialTimeout()
+			if conn, derr := d.DialContext(ctx, "tcp", host); derr == nil {
+				upstream, via = conn, "fallback"
+				s.logger().Info("候选全灭，直连兜底", "domain", domain)
+			} else {
+				dialErr = derr
+			}
+		}
 	} else {
 		via = "direct"
 		var d net.Dialer

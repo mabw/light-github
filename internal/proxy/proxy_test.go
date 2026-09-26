@@ -147,10 +147,11 @@ func TestProxy_AllCandidatesFailReturns502(t *testing.T) {
 	dialer := &fakeDialer{ips: []net.IP{net.ParseIP("240.0.0.1")}}
 	proxyURL, _ := newStack(t, dialer)
 
-	// Go http client 收到非 200 的 CONNECT 响应表现为 error（"Bad Gateway"）
+	// Go http client 收到非 200 的 CONNECT 响应表现为 error（"Bad Gateway"）。
+	// accel.test 不可解析：候选拨号失败 + M5-8 直连兜底也失败 → 502
 	_, err := proxiedClient(t, proxyURL).Get("https://accel.test/")
 	if err == nil {
-		t.Fatal("全部候选失败应表现为 Bad Gateway 错误")
+		t.Fatal("候选与直连兜底全失败应表现为 Bad Gateway 错误")
 	}
 	if len(dialer.failures) != 1 {
 		t.Fatalf("失败应上报: %v", dialer.failures)
@@ -528,5 +529,71 @@ func TestProxy_CapsDialAttempts(t *testing.T) {
 	}
 	if len(dialer.failures) > 4 {
 		t.Fatalf("候选全灭应最多尝试 %d 个（快速失败），实际 %d", 4, len(dialer.failures))
+	}
+}
+
+// ---- M5-8：深封锁直连兜底 ----
+
+// M5-8：候选全灭（深封锁期测速全惩罚+拨号全失败）时退化为系统解析直连——
+// 2026-09-26 实测封锁为「新建连接高丢包」而非全断：浏览器直连靠 TCP 重传
+// 硬扛仍可开页（10s 级），远优于代理快速 502（用户实测「关代理反而快」的
+// 机制根源）。候选经 dirty+冷却重测恢复后自然回到加速。
+// 规则表放行 127.0.0.1（命中白名单走 accel），候选给必失败的保留地址；
+// 兜底按 CONNECT 原目标 127.0.0.1:<upPort> 直连成功。
+func TestProxy_FallsBackToDirectWhenCandidatesExhausted(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Connection", "close")
+		_, _ = w.Write([]byte("fallback-ok"))
+	}))
+	t.Cleanup(upstream.Close)
+	upAddr := upstream.Listener.Addr().String()
+
+	srv := &Server{
+		Addr:        "127.0.0.1:0",
+		Table:       rule.NewTable([]rule.Rule{{Domain: "127.0.0.1", Kind: rule.KindFixedIP, Forward: "240.0.0.1"}}),
+		Dialer:      &fakeDialer{ips: []net.IP{net.ParseIP("240.0.0.1")}}, // 必失败候选
+		Metrics:     metrics.NewStore(time.Second),
+		DialTimeout: 300 * time.Millisecond,
+	}
+	addr, err := srv.ListenAndServe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+
+	resp, err := proxiedClient(t, &url.URL{Scheme: "http", Host: addr.String()}).Get("https://" + upAddr + "/")
+	if err != nil {
+		t.Fatalf("候选全灭应直连兜底成功: %v", err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(b) != "fallback-ok" {
+		t.Fatalf("兜底连接应到达真实上游: %q", b)
+	}
+	if fd := srv.Dialer.(*fakeDialer); len(fd.failures) == 0 {
+		t.Fatal("前置条件：候选应已失败上报")
+	}
+
+	// 兜底路径须在连接日志留痕（via=fallback）——下次封锁波动期的观测依据
+	var conns []metrics.ConnInfo
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if conns = srv.Metrics.Conns(10); len(conns) > 0 {
+			break
+		}
+	}
+	if len(conns) == 0 || conns[0].Via != "fallback" {
+		t.Fatalf("连接日志应记录 via=fallback: %+v", conns)
+	}
+}
+
+// 兜底也失败（候选死 + 直连目标不可达）时仍 502——SNI 干扰期即此形态
+func TestProxy_FallbackFailureStill502(t *testing.T) {
+	dialer := &fakeDialer{ips: []net.IP{net.ParseIP("240.0.0.1")}}
+	proxyURL, _ := newStack(t, dialer)
+
+	// accel.test 为不可解析假域名：候选拨号失败 + 兜底系统解析也失败
+	_, err := proxiedClient(t, proxyURL).Get("https://accel.test/")
+	if err == nil {
+		t.Fatal("候选与兜底全失败应表现为 Bad Gateway")
 	}
 }
