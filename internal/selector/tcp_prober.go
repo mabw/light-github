@@ -114,11 +114,26 @@ func (p *MedianProber) httpOK(ctx context.Context, domain string, ip net.IP, por
 	if err != nil {
 		return false
 	}
-	resp, err := (&http.Client{Transport: tr, Timeout: timeout}).Do(req)
+	// 禁用重定向跟随（M5-11）：拿原始响应判定——默认跟随会把「301 到别域」
+	// 洗成「最终 200」（实测 api.github.com 被 web 前端 IP 301 到 github.com/，
+	// octotree 的 API 请求全拿到 HTML）。3xx = 此 IP 不直接服务该域。
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
+
+	// 重定向：此 IP 把该域指到别处 = 不服务该域（跨域路由形态）
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return false
+	}
 
 	// 健康节点指纹（M5-10）：GitHub 边缘存在独立健康服务（实测 140.82.114.22，
 	// 2026-09-26「页面只返回一个 ok」的元凶）——*.github.com 泛证书握手合法、

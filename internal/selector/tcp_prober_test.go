@@ -143,3 +143,30 @@ func TestMedianProber_App200JSONStillAlive(t *testing.T) {
 		t.Fatalf("200 JSON 是正常 API 服务，不应惩罚: %v", cost)
 	}
 }
+
+// M5-11：重定向判死（禁跟随）——api.github.com 被 web 前端 IP 301 到
+// github.com/（跨域路由），http.Client 默认跟随把「301 到别域」洗成
+// 「最终 200 text/html」被判活，octotree 的 API 请求全拿到 HTML（2026-09-26
+// 用户实测「api.github.com 无法访问，octotree 不可用」）。必须拿原始响应
+// 判定：3xx = 此 IP 不服务该域。
+func TestMedianProber_RedirectRejected(t *testing.T) {
+	// DialTLSContext 锁定探测 IP+SNI：跟随请求打回同一服务的重定向路径。
+	// handler 对 /redirected 返回 200 —— 默认跟随语义下「301 → 200」被洗成
+	// 最终 200 判活；修复后拿原始 301 判死
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/redirected" {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(200)
+			return
+		}
+		http.Redirect(w, r, "https://api.example.com/redirected", http.StatusMovedPermanently)
+	}))
+	t.Cleanup(srv.Close)
+	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+
+	p := &MedianProber{Count: 1, Timeout: 300 * time.Millisecond, Port: port}
+	cost := p.Probe(context.Background(), "api.example.com", net.ParseIP(host))
+	if cost != 300*time.Millisecond {
+		t.Fatalf("301 重定向（不服务该域）应按超时值惩罚: %v", cost)
+	}
+}
