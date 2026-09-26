@@ -6,6 +6,7 @@
 package logx
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -119,11 +120,9 @@ func (m *Manager) Recent(kind string, n int) []Entry {
 }
 
 // Close 关闭底层轮转文件（触发备份压缩收尾）。
+// 两个都关（review M9：首错短路会让 connFile 永不关闭、压缩收尾丢失）。
 func (m *Manager) Close() error {
-	if err := m.appFile.Close(); err != nil {
-		return err
-	}
-	return m.connFile.Close()
+	return errors.Join(m.appFile.Close(), m.connFile.Close())
 }
 
 func normalize(o Options) Options {

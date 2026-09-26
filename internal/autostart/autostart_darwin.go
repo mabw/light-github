@@ -3,10 +3,19 @@
 package autostart
 
 import (
+	"encoding/xml"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
+
+// xmlEscape 路径含 &<> 等字符时防止产出非法 plist（review N8）。
+func xmlEscape(s string) string {
+	var b strings.Builder
+	_ = xml.EscapeText(&b, []byte(s))
+	return b.String()
+}
 
 const plistName = "com.marvin.light-github.plist"
 
@@ -39,7 +48,7 @@ func Enable(execPath string) error {
 	<false/>
 </dict>
 </plist>
-`, execPath)
+`, xmlEscape(execPath))
 	return os.WriteFile(filepath.Join(dir, plistName), []byte(plist), 0o644)
 }
 

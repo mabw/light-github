@@ -58,4 +58,3 @@ func invalidateState() {
 	stateAt = time.Time{}
 	stateMu.Unlock()
 }
-

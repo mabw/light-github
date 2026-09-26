@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -8,8 +9,8 @@ import (
 
 func TestStore_AccumulatesTotals(t *testing.T) {
 	s := NewStore(time.Second)
-	s.Add(100, 50)
-	s.Add(30, 20)
+	s.RecordConn(ConnInfo{Up: 100, Down: 50})
+	s.RecordConn(ConnInfo{Up: 30, Down: 20})
 	snap := s.Snapshot()
 	if snap.TotalUp != 130 || snap.TotalDown != 70 {
 		t.Fatalf("累计错误: %+v", snap)
@@ -18,7 +19,7 @@ func TestStore_AccumulatesTotals(t *testing.T) {
 
 func TestStore_WindowRate(t *testing.T) {
 	s := NewStore(200 * time.Millisecond)
-	s.Add(1000, 500)
+	s.RecordConn(ConnInfo{Up: 1000, Down: 500})
 
 	snap := s.Snapshot()
 	if snap.RateUp <= 0 || snap.RateDown <= 0 {
@@ -43,7 +44,7 @@ func TestStore_ConcurrentAdds(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s.Add(1, 1)
+			s.RecordConn(ConnInfo{Up: 1, Down: 1, OK: true})
 		}()
 	}
 	wg.Wait()
@@ -89,5 +90,21 @@ func TestStore_OnRecordHook(t *testing.T) {
 
 	if len(got) != 2 || got[0].Domain != "github.com" || got[1].Domain != "api.github.com" {
 		t.Fatalf("钩子应收到每条连接: %+v", got)
+	}
+}
+
+// 环形覆盖：写入超过 logMax 后保留最后 logMax 条且最新在前（review M1）
+func TestStore_ConnLogRingOverwrite(t *testing.T) {
+	s := NewStore(time.Second)
+	s.logMax = 5
+	for i := 0; i < 12; i++ {
+		s.RecordConn(ConnInfo{Domain: fmt.Sprintf("d%d", i), OK: true})
+	}
+	conns := s.Conns(10)
+	if len(conns) != 5 {
+		t.Fatalf("应保留 logMax 条: %d", len(conns))
+	}
+	if conns[0].Domain != "d11" || conns[4].Domain != "d7" {
+		t.Fatalf("应保留 d7..d11 且最新在前: %v", conns)
 	}
 }

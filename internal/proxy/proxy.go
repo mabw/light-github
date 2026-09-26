@@ -27,9 +27,6 @@ func (s *Server) logger() *slog.Logger {
 	return slog.Default()
 }
 
-// bufioReader 每连接独立的带缓冲读取器
-func bufioReader(c net.Conn) *bufio.Reader { return bufio.NewReader(c) }
-
 // writeSimpleResponse 写一条极简 HTTP 响应（用于拒绝/错误场景）
 func writeSimpleResponse(c net.Conn, code int, msg string) error {
 	_, err := fmt.Fprintf(c, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
@@ -170,7 +167,7 @@ func (s *Server) handleConn(client net.Conn) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	req, err := http.ReadRequest(bufioReader(client))
+	req, err := http.ReadRequest(bufio.NewReader(client))
 	if err != nil {
 		return
 	}

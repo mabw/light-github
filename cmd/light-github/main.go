@@ -438,7 +438,8 @@ func openBrowser(url string) {
 	default:
 		cmd = exec.Command("xdg-open", url)
 	}
-	if err := cmd.Start(); err != nil {
+	// Run 而非 Start：回收子进程避免僵尸（open/xdg-open 本身立即返回，不阻塞）
+	if err := cmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "打开浏览器失败: %v（控制台地址 %s）\n", err, url)
 	}
 }

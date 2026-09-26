@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -89,8 +90,9 @@ func (c *Client) Resolve(ctx context.Context, domain string) ([]net.IP, error) {
 
 // queryOne 查询单端点，只取公网 IPv4 A 记录
 func (c *Client) queryOne(ctx context.Context, endpoint, domain string) ([]net.IP, error) {
-	url := endpoint + "?name=" + domain + "&type=A"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	q := url.Values{"name": {domain}, "type": {"A"}}
+	u := endpoint + "?" + q.Encode() // review N3：domain 含 &/# 等字符时防查询串损坏
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}

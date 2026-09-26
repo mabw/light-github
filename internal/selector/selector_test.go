@@ -297,7 +297,7 @@ func TestSetTable_DoesNotBlockOtherDomainsOnInflightProbe(t *testing.T) {
 
 	setDone := make(chan struct{})
 	go func() { s.SetTable(rule.NewTable(nil)); close(setDone) }() // 换表清缓存
-	time.Sleep(150 * time.Millisecond)                              // 让 SetTable 进入等分片锁状态
+	time.Sleep(150 * time.Millisecond)                             // 让 SetTable 进入等分片锁状态
 
 	// 关键断言：SetTable 等待期间，其他域名的 Pick 不被全局锁拖住
 	start := time.Now()

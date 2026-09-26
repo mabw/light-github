@@ -51,7 +51,11 @@ func (s *Selector) Inspect() []DomainInfo {
 	out := make([]DomainInfo, 0, len(pairs))
 	for _, p := range pairs {
 		st := p.st
-		st.mu.Lock()
+		// TryLock（review M6）：探测在途的分片（持锁最长 ~3s）直接跳过
+		// 本轮不展示，而不是让 /api/rules 整体等一个慢域名
+		if !st.mu.TryLock() {
+			continue
+		}
 		if st.probedAt.IsZero() { // Preload 进行中尚未完成的分片
 			st.mu.Unlock()
 			continue

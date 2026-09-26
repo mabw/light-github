@@ -174,7 +174,8 @@ func (s *GitHub520) Fetch(ctx context.Context) ([]rule.Rule, error) {
 		if len(p) != 2 {
 			continue
 		}
-		if ip := net.ParseIP(p[0]); ip == nil || ip.IsLoopback() || ip.IsPrivate() {
+		if ip := net.ParseIP(p[0]); ip == nil || ip.IsLoopback() || ip.IsPrivate() ||
+			ip.IsLinkLocalUnicast() || ip.IsUnspecified() { // review M2：第三方源可注入云元数据地址
 			continue
 		}
 		rules = append(rules, rule.Rule{Domain: strings.ToLower(p[1]), Kind: rule.KindFixedIP, Forward: p[0]})
@@ -342,7 +343,11 @@ func (m *Manager) merge(results []fetchResult) []rule.Rule {
 
 	if m.CachePath != "" && len(rules) > 0 {
 		if b, err := json.Marshal(rules); err == nil {
-			_ = os.WriteFile(m.CachePath, b, 0o600)
+			// tmp+rename 原子写（review M4：半截 JSON 会让离线兜底静默失效）
+			tmp := m.CachePath + ".tmp"
+			if werr := os.WriteFile(tmp, b, 0o600); werr == nil {
+				_ = os.Rename(tmp, m.CachePath) // rename 失败保留旧缓存，下次再试
+			}
 		}
 	}
 	return rules

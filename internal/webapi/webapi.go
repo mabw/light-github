@@ -240,9 +240,13 @@ func (d *Deps) handleRules(w http.ResponseWriter, r *http.Request) {
 	if d.Rules != nil {
 		rules = d.Rules()
 	}
+	var domains []selector.DomainInfo
+	if d.Selector != nil { // nil 守卫与其他 Deps 约定一致（review N5）
+		domains = d.Selector.Inspect()
+	}
 	writeJSON(w, http.StatusOK, envelope{Success: true, Data: map[string]any{
 		"rules":   rules,
-		"domains": d.Selector.Inspect(),
+		"domains": domains,
 	}})
 }
 
@@ -323,6 +327,10 @@ func (d *Deps) handleProbe(w http.ResponseWriter, r *http.Request) {
 	domain := r.URL.Query().Get("domain")
 	if domain == "" {
 		writeJSON(w, http.StatusBadRequest, envelope{Error: "缺少 domain 参数"})
+		return
+	}
+	if d.Selector == nil { // nil 守卫与其他 Deps 约定一致（review N5）
+		writeJSON(w, http.StatusServiceUnavailable, envelope{Error: "选择器未接入"})
 		return
 	}
 	if _, err := d.Selector.Reprobe(r.Context(), domain); err != nil {
@@ -432,6 +440,9 @@ func (d *Deps) handlePAC(w http.ResponseWriter, r *http.Request) {
 
 	var b strings.Builder
 	b.WriteString("// light-github PAC——白名单 https 走本地代理，其余直连\n")
+	// pattern 与 rule.Table.Match 语义已对齐（review N7 查证为一致，勿"成对补裸域"）：
+	// 精确规则 d 只命中裸域；通配 *.d 的 shExpMatch 与 Table 逐级后缀同样要求
+	// 有点前缀且 * 跨点，两边对裸域/子域的判定完全一致。
 	b.WriteString("function FindProxyForURL(url, host) {\n")
 	b.WriteString("  if (url.substring(0, 6) !== \"https:\") return \"DIRECT\"; // 仅加速 https 隧道\n")
 	for _, p := range patterns {

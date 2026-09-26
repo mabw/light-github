@@ -51,23 +51,14 @@ type Store struct {
 	conns     int64
 	failed    int64
 	samples   []sample
-	connLog   []ConnInfo // 环形缓冲（最新在前）
+	connLog   []ConnInfo // 环形缓冲（connPos 为下一写入位，覆盖最旧）
+	connPos   int
 	logMax    int
 }
 
 // NewStore 构造；window 为实时速率滑动窗口（设计值 5s）。
 func NewStore(window time.Duration) *Store {
 	return &Store{window: window, logMax: 1000}
-}
-
-// Add 累计流量字节。
-func (s *Store) Add(up, down int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.totalUp += up
-	s.totalDown += down
-	s.samples = append(s.samples, sample{at: time.Now(), up: up, dn: down})
-	s.trimLocked()
 }
 
 // RecordConn 记录一条连接（同时累计其流量并喂入速率窗口——DEBT-1：
@@ -85,9 +76,13 @@ func (s *Store) RecordConn(info ConnInfo) {
 		s.samples = append(s.samples, sample{at: info.At, up: info.Up, dn: info.Down})
 		s.trimLocked()
 	}
-	s.connLog = append([]ConnInfo{info}, s.connLog...)
-	if len(s.connLog) > s.logMax {
-		s.connLog = s.connLog[:s.logMax]
+	// 环形写入（review M1：原 O(n) 全量前插，logMax=1000 时每连接 ~100KB 分配+memmove）
+	if len(s.connLog) < s.logMax {
+		s.connLog = append(s.connLog, info)
+		s.connPos = len(s.connLog) % s.logMax
+	} else {
+		s.connLog[s.connPos] = info
+		s.connPos = (s.connPos + 1) % s.logMax
 	}
 	s.mu.Unlock()
 
@@ -103,8 +98,11 @@ func (s *Store) Conns(n int) []ConnInfo {
 	if n > len(s.connLog) {
 		n = len(s.connLog)
 	}
-	out := make([]ConnInfo, n)
-	copy(out, s.connLog[:n])
+	out := make([]ConnInfo, 0, n)
+	for i := 0; i < n; i++ { // 自写入位倒序回走：最新在前
+		idx := (s.connPos - 1 - i + len(s.connLog)) % len(s.connLog)
+		out = append(out, s.connLog[idx])
+	}
 	return out
 }
 
