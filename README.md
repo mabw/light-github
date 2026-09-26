@@ -64,7 +64,7 @@ git / 浏览器 / curl（CONNECT 127.0.0.1:12800）
 | 2 | GitHub520 `hosts.json` | 社区定时测速的固定 IP 补充 |
 | 3 | 内置清单（编译期嵌入） | GitHub + Docker Hub + HuggingFace 核心域名，Dynamic 策略保底 |
 
-设计与验证细节见 [docs/DESIGN.md](docs/DESIGN.md) 与 [docs/SPIKE-RESULT.md](docs/SPIKE-RESULT.md)；已知技术欠账见 [docs/DEBT.md](docs/DEBT.md)。
+设计与验证细节见 [docs/DESIGN.md](docs/DESIGN.md) 与 [docs/SPIKE-RESULT.md](docs/SPIKE-RESULT.md)；已知技术欠账见 [docs/DEBT.md](docs/DEBT.md)；稳定性调研（对标 Watt Toolkit，M5 依据）见 [docs/RESEARCH-WATT-STABILITY.md](docs/RESEARCH-WATT-STABILITY.md)。
 
 ## 开发
 
