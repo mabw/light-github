@@ -55,12 +55,13 @@ type candidate struct {
 }
 
 type domainState struct {
-	mu          sync.Mutex // DEBT-4：域名级分片锁（测速期间仅阻塞同域名）
-	probedAt    time.Time
-	lastBuildAt time.Time // 最近一次重建时刻（冷却判定：深封锁期防每请求全量重测）
-	dirty       bool      // 需重建（失败上报/规则换表置位）；不清 probedAt——Inspect 在重建前仍可展示旧数据
-	generations int       // 已重建次数：首个缓存用 firstTTL（短），第二个起用 steadyTTL（Watt 10s/100s 语义）
-	candidates  []candidate
+	mu           sync.Mutex // DEBT-4：域名级分片锁（测速期间仅阻塞同域名）
+	probedAt     time.Time
+	lastBuildAt  time.Time // 最近一次重建时刻（冷却判定：深封锁期防每请求全量重测）
+	dirty        bool      // 需重建（失败上报/规则换表置位）；不清 probedAt——Inspect 在重建前仍可展示旧数据
+	forceRebuild bool      // Reprobe 显式强制重建：旁路冷却防抖（用户手动操作立即生效，M5-7 回归修复）
+	generations  int       // 已重建次数：首个缓存用 firstTTL（短），第二个起用 steadyTTL（Watt 10s/100s 语义）
+	candidates   []candidate
 }
 
 // expired 选路结果是否过期（M5 §2.5 生命周期回收）：dirty 立即过期；
@@ -119,7 +120,8 @@ func (s *Selector) cooldown() time.Duration {
 }
 
 // SetTable 原子替换规则表并清空测速缓存时间戳（策略已变，
-// 各域名下次 Pick 重建候选；failure 记忆与旧候选保留供兜底）。
+// 各域名下次 Pick 重建候选——forceRebuild 旁路冷却：旧候选基于旧策略，
+// 换表是低频操作（1h 数据源刷新）无防抖风险；failure 记忆与旧候选保留供兜底）。
 //
 // 锁序（review H1）：先在全局锁内收集分片快照并立即释放，再逐分片清——
 // 分片锁内是网络 IO（DoH+测速，秒级），若持全局锁逐域等分片锁，
@@ -139,6 +141,7 @@ func (s *Selector) SetTable(t *rule.Table) {
 	for _, st := range states {
 		st.mu.Lock()
 		st.dirty = true
+		st.forceRebuild = true
 		st.mu.Unlock()
 	}
 }
@@ -173,15 +176,17 @@ func (s *Selector) Pick(ctx context.Context, domain string) ([]net.IP, error) {
 		// 重建冷却（深封锁期防抖）：dirty 循环（拨号失败→dirty→重建→测速
 		// 全灭→再失败）会让每个请求都在锁内同步全量重测（8 IP × 3 TCP +
 		// 8 HEAD，秒级），并发请求全部阻塞——冷却期内沿用旧候选，由拨号侧
-		// 快速失败兜底，冷却过后再重测
-		if st.dirty && !st.lastBuildAt.IsZero() && time.Since(st.lastBuildAt) < s.cooldown() {
-			// 沿用旧候选（可能全灭，拨号侧 4 候选快速 502）
+		// 快速失败兜底，冷却过后再重测。forceRebuild（Reprobe 显式操作）
+		// 不受防抖约束
+		if st.dirty && !st.forceRebuild && !st.lastBuildAt.IsZero() && time.Since(st.lastBuildAt) < s.cooldown() {
+			// 沿用旧候选（可能全灭，拨号侧 4 候选快速 502 / M5-8 直连兜底）
 		} else {
 			cands, err := s.buildCandidates(ctx, domain, st)
 			if err != nil && len(cands) == 0 {
 				return nil, err
 			}
 			st.candidates, st.probedAt, st.dirty = cands, time.Now(), false
+			st.forceRebuild = false
 			st.generations++
 			st.lastBuildAt = time.Now()
 		}

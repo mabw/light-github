@@ -24,10 +24,13 @@ type DomainInfo struct {
 }
 
 // Reprobe 强制对单域名重新测速（忽略 TTL 缓存；Web UI 手动测速按钮）。
+// forceRebuild 旁路 M5-7 重建冷却——防抖面向自动 dirty 循环，用户显式
+// 操作必须立即生效（回归修复：冷却合入后 5s 内点按钮无效）。
 func (s *Selector) Reprobe(ctx context.Context, domain string) ([]net.IP, error) {
 	st := s.stateFor(domain)
 	st.mu.Lock()
-	st.dirty = true // 使 Pick 视为过期重建（不清 probedAt，保持 Inspect 可见）
+	st.dirty = true        // 使 Pick 视为过期重建（不清 probedAt，保持 Inspect 可见）
+	st.forceRebuild = true // 旁路冷却防抖
 	st.mu.Unlock()
 	return s.Pick(ctx, domain)
 }

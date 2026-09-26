@@ -313,20 +313,23 @@ func TestSetTable_DoesNotBlockOtherDomainsOnInflightProbe(t *testing.T) {
 
 // ---- M5 Phase 2：失败即时反馈 + 选路生命周期回收 ----
 
-// 拨号失败上报应立即失效测速缓存（下次 Pick 重建重测，不等 TTL）
+// 拨号失败上报应失效测速缓存（冷却过后的下次 Pick 重建重测，不等 TTL；
+// M5-7 起重建有冷却防抖，注入短冷却验证失效语义本身）
 func TestReportFailure_InvalidatesCache(t *testing.T) {
 	res := &fakeResolver{ips: []net.IP{ip("1.1.1.1")}}
 	tbl := rule.NewTable([]rule.Rule{{Domain: "github.com", Kind: rule.KindDynamic}})
 	s := New(tbl, res, &fakeProber{}, time.Minute, time.Minute)
+	s.RebuildCooldown = time.Millisecond
 
 	_, _ = s.Pick(context.Background(), "github.com")
 	if res.calls != 1 {
 		t.Fatalf("首次 Pick 应解析一次: %d", res.calls)
 	}
 	s.ReportFailure("github.com", ip("1.1.1.1"))
+	time.Sleep(2 * time.Millisecond) // 越过冷却窗口（防抖：冷却内沿用旧候选）
 	_, _ = s.Pick(context.Background(), "github.com")
 	if res.calls != 2 {
-		t.Fatalf("失败上报后应重建候选（重新解析）: %d", res.calls)
+		t.Fatalf("失败上报且冷却过后应重建候选（重新解析）: %d", res.calls)
 	}
 }
 
