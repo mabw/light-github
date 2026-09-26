@@ -73,6 +73,21 @@
 
 ## 待清偿
 
+### DEBT-9 🔴 托盘 UI 死锁：点击「系统代理」后菜单永久无响应（macOS 实发，2026-09-26）
+
+- **位置**：`internal/tray/tray.go`（syncMenu ticker / toggleUnderLock）与 energye/systray darwin 原生层交互
+- **复现**（用户真机，v0.3.0 部署版）：09:31:01-02 连续开关「加速」正常（有日志），随后点击「系统代理」——**无任何日志**（setSysProxy 未被调用，连失败路径的 Warn 都没有），此后图标点击永久无响应。
+- **证据链**：
+  - 进程存活，HTTP 服务正常（/pac 返回 200），Go 层信号处理正常；
+  - SIGTERM 后退出清理**完整执行**（PAC 还原、会话统计落盘），但进程不退出（systray.Quit → NSApp terminate 未生效）→ 卡点在 AppKit 主线程/事件循环，而非 Go 逻辑；
+  - networksetup 手测 0.019s 正常，排除系统命令挂起。
+- **初判**：跨语言死锁——`syncMenu` 2s ticker 持 `menuMu` 调 native（SetTitle/SetChecked 需在 AppKit 主线程执行），与 AppKit 弹出菜单（ShowMenu 阻塞主线程模态循环）、native 点击回调进 Go（toggleUnderLock 抢同一把锁）构成三方循环等待。menuMu（review H5）只防了 Go 层并发，未防 native 重入。
+- **修复方向**（待网络恢复后实施，v0.4.0 tag 前必须）：
+  1. ticker syncMenu 改 TryLock，拿不到即跳过本轮（打断「持锁等 native」一环）；
+  2. native 调用是否可重入/是否必须主线程，读 energye/systray 的 systray_darwin.m 确认；
+  3. 回归用例：模拟「菜单打开期间 ticker 触发」的并发路径。
+- **临时规避**：进程卡死后 kill -TERM 可完整还原系统代理（退出清理先于 Quit 执行的设计救了场）；kill 不掉时 kill -9 后 PAC 已是还原态（清理在 Quit 前完成）。
+
 ### DEBT-7 🟢 sysproxy 的 Windows/Linux 分支未经真机验证
 
 - **位置**：`internal/sysproxy/sysproxy_windows.go`、`sysproxy_linux.go`
