@@ -74,14 +74,23 @@ func New(tbl *rule.Table, resolver Resolver, prober Prober, cacheTTL time.Durati
 
 // SetTable 原子替换规则表并清空测速缓存时间戳（策略已变，
 // 各域名下次 Pick 重建候选；failure 记忆与旧候选保留供兜底）。
+//
+// 锁序（review H1）：先在全局锁内收集分片快照并立即释放，再逐分片清——
+// 分片锁内是网络 IO（DoH+测速，秒级），若持全局锁逐域等分片锁，
+// 等待期间所有域名的 stateFor/Pick 都会被拖住。
 func (s *Selector) SetTable(t *rule.Table) {
 	s.tblMu.Lock()
 	s.tbl = t
 	s.tblMu.Unlock()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	states := make([]*domainState, 0, len(s.states))
 	for _, st := range s.states {
+		states = append(states, st)
+	}
+	s.mu.Unlock()
+
+	for _, st := range states {
 		st.mu.Lock()
 		st.probedAt = time.Time{}
 		st.mu.Unlock()

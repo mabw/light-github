@@ -272,3 +272,41 @@ func TestSelector_PreloadFillsCache(t *testing.T) {
 		t.Fatal("预热本身应触发测速")
 	}
 }
+
+// SetTable 清缓存时不得持全局锁等分片锁（review H1）：
+// 分片锁内是网络 IO（DoH+测速），持全局锁等待会卡住所有域名的 stateFor/Pick。
+// 场景：a.com 在途慢探测（2s）→ SetTable → b.com 的 Pick 仍应快速完成。
+func TestSetTable_DoesNotBlockOtherDomainsOnInflightProbe(t *testing.T) {
+	res := &mapResolver{m: map[string][]net.IP{
+		"a.com": {ip("1.1.1.1")},
+		"b.com": {ip("2.2.2.2")},
+	}}
+	// 真阻塞探针：fakeProber 只返回耗时值不阻塞，复现不了持锁跨 IO
+	prober := &blockingProber{delay: map[string]time.Duration{
+		"1.1.1.1": 2 * time.Second, // a.com 慢探测（持其分片锁）
+		"2.2.2.2": 10 * time.Millisecond,
+	}}
+	tbl := rule.NewTable([]rule.Rule{
+		{Domain: "a.com", Kind: rule.KindDynamic},
+		{Domain: "b.com", Kind: rule.KindDynamic},
+	})
+	s := New(tbl, res, prober, 5*time.Minute)
+
+	go func() { _, _ = s.Pick(context.Background(), "a.com") }()
+	time.Sleep(100 * time.Millisecond) // 等 a.com 进入慢探测
+
+	setDone := make(chan struct{})
+	go func() { s.SetTable(rule.NewTable(nil)); close(setDone) }() // 换表清缓存
+	time.Sleep(150 * time.Millisecond)                              // 让 SetTable 进入等分片锁状态
+
+	// 关键断言：SetTable 等待期间，其他域名的 Pick 不被全局锁拖住
+	start := time.Now()
+	if _, err := s.Pick(context.Background(), "b.com"); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("SetTable 等待在途探测期间其他域名应仍可 Pick，实际 %v（全局锁被拖住）", elapsed)
+	}
+	<-setDone
+	_ = setDone
+}
