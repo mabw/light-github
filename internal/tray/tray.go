@@ -11,6 +11,8 @@ import (
 	"fmt"
 
 	"github.com/energye/systray"
+
+	"github.com/mabw/light-github/internal/safego"
 )
 
 // template 图标：GitHub Octicons mark-github（黑色 + alpha，256px 矢量直渲
@@ -88,13 +90,13 @@ func Run(ctx context.Context, deps Deps, cleanup func()) error {
 	if err := deps.validate(); err != nil {
 		return err
 	}
-	go func() {
+	safego.Go("tray-quit", nil, func() {
 		<-ctx.Done()
 		if cleanup != nil {
 			cleanup() // 服务收尾（还原系统代理/会话统计/关监听）
 		}
 		systray.Quit() // darwin：进程在此终止，下方 return 不可达
-	}()
+	})
 	systray.Run(func() { onReady(deps) }, nil)
 	return nil
 }

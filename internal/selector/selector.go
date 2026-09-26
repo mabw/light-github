@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/mabw/light-github/internal/rule"
+	"github.com/mabw/light-github/internal/safego"
 )
 
 // sinkThreshold 连续失败达到此次数的候选沉底
@@ -179,7 +180,8 @@ func (s *Selector) Preload(ctx context.Context, domains []string, concurrency in
 	var wg sync.WaitGroup
 	for _, d := range domains {
 		wg.Add(1)
-		go func(domain string) {
+		d := d
+		safego.Go("preload-domain", nil, func() {
 			defer wg.Done()
 			select {
 			case sem <- struct{}{}:
@@ -187,8 +189,8 @@ func (s *Selector) Preload(ctx context.Context, domains []string, concurrency in
 				return
 			}
 			defer func() { <-sem }()
-			_, _ = s.Pick(ctx, domain)
-		}(d)
+			_, _ = s.Pick(ctx, d)
+		})
 	}
 	wg.Wait()
 }
@@ -252,10 +254,11 @@ func (s *Selector) buildCandidates(ctx context.Context, domain string, st *domai
 	var wg sync.WaitGroup
 	for i, ip := range merged {
 		wg.Add(1)
-		go func(i int, ip net.IP) {
+		i, ip := i, ip
+		safego.Go("probe", nil, func() {
 			defer wg.Done()
 			cands[i] = candidate{ip: ip, cost: s.prober.Probe(ctx, domain, ip)}
-		}(i, ip)
+		})
 	}
 	wg.Wait()
 

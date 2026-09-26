@@ -27,7 +27,9 @@ func (s stubResolver) Resolve(context.Context, string) ([]net.IP, error) { retur
 
 type stubProber struct{}
 
-func (stubProber) Probe(context.Context, net.IP) time.Duration { return 10 * time.Millisecond }
+func (stubProber) Probe(_ context.Context, _ string, ip net.IP) time.Duration {
+	return 10 * time.Millisecond
+}
 
 type stubFetcher struct{}
 
@@ -52,7 +54,7 @@ func newDeps(t *testing.T, cfg config.Config) *Deps {
 		{Domain: "github.com", Kind: rule.KindFixedIP, Forward: "1.2.3.4"},
 		{Domain: "*.githubusercontent.com", Kind: rule.KindDynamic},
 	}
-	sel := selector.New(rule.NewTable(rules), stubResolver{ips: []net.IP{net.ParseIP("1.2.3.4")}}, stubProber{}, 5*time.Minute)
+	sel := selector.New(rule.NewTable(rules), stubResolver{ips: []net.IP{net.ParseIP("1.2.3.4")}}, stubProber{}, 10*time.Second, 5*time.Minute)
 	_, _ = sel.Pick(context.Background(), "github.com")
 
 	return &Deps{

@@ -30,6 +30,7 @@ import (
 	"github.com/mabw/light-github/internal/metrics"
 	"github.com/mabw/light-github/internal/proxy"
 	"github.com/mabw/light-github/internal/rule"
+	"github.com/mabw/light-github/internal/safego"
 	"github.com/mabw/light-github/internal/selector"
 	"github.com/mabw/light-github/internal/source"
 	"github.com/mabw/light-github/internal/sysproxy"
@@ -119,7 +120,7 @@ func main() {
 
 	// 选择器 + 后台预热（首请求命中缓存）
 	sel := selector.New(table, doh.New(), &selector.MedianProber{}, 10*time.Second, 100*time.Second)
-	go sel.Preload(ctx, preloadDomains(rules), 4)
+	safego.Go("preload", log, func() { sel.Preload(ctx, preloadDomains(rules), 4) })
 
 	// 指标 + 连接日志落盘钩子
 	store := metrics.NewStore(5 * time.Second)
@@ -275,7 +276,7 @@ func main() {
 	printOnboarding(listenAddr.String())
 
 	// 定时刷新（周期可被 Web UI 热改）
-	go func() {
+	safego.Go("rules-refresh", log, func() {
 		for {
 			d := time.Duration(refreshEvery.Load())
 			if d <= 0 {
@@ -294,7 +295,7 @@ func main() {
 				}
 			}
 		}
-	}()
+	})
 
 	// 统一退出清理（sync.Once：托盘路径与 headless 兜底可能先后触达）。
 	// 托盘模式下 cleanup 必须先于 systray.Quit 执行——Quit 即进程终止（darwin）。

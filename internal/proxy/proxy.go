@@ -17,6 +17,7 @@ import (
 
 	"github.com/mabw/light-github/internal/metrics"
 	"github.com/mabw/light-github/internal/rule"
+	"github.com/mabw/light-github/internal/safego"
 )
 
 // logger 返回服务日志出口（Log 未注入时退到默认，保证 accept 异常可见——review H6）。
@@ -141,7 +142,7 @@ func (s *Server) ListenAndServe(context.Context) (net.Addr, error) {
 		return nil, fmt.Errorf("监听 %s 为非回环地址且未配置 token（拒绝暴露未鉴权代理）", tcp)
 	}
 	s.ln = ln
-	go func() {
+	safego.Go("accept-loop", s.Log, func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
@@ -154,9 +155,9 @@ func (s *Server) ListenAndServe(context.Context) (net.Addr, error) {
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
-			go s.handleConn(conn)
+			safego.Go("conn", s.Log, func() { s.handleConn(conn) })
 		}
-	}()
+	})
 	return ln.Addr(), nil
 }
 
@@ -264,7 +265,7 @@ func (s *Server) handleConnect(ctx context.Context, cancel context.CancelFunc, c
 		return
 	}
 
-	up, down := tunnel(ctx, cancel, client, upstream, s.idleTimeout())
+	up, down := tunnel(ctx, cancel, client, upstream, s.idleTimeout(), s.logger())
 	s.record(domain, via, usedIP, start, up, down, true, "")
 }
 
@@ -282,7 +283,7 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 
 // tunnel 双向搬运并半关闭，返回 (客户端→上游, 上游→客户端) 字节数。
 // DEBT-2：空闲超过 idleTimeout 即双向强制关闭，防止半开连接泄漏 goroutine。
-func tunnel(ctx context.Context, cancel context.CancelFunc, a, b net.Conn, idleTimeout time.Duration) (int64, int64) {
+func tunnel(ctx context.Context, cancel context.CancelFunc, a, b net.Conn, idleTimeout time.Duration, log *slog.Logger) (int64, int64) {
 	var up, down atomic.Int64
 	done := make(chan int64, 2)
 	cp := func(dst io.Writer, counter *atomic.Int64, src io.Reader) {
@@ -292,8 +293,8 @@ func tunnel(ctx context.Context, cancel context.CancelFunc, a, b net.Conn, idleT
 		}
 		done <- n
 	}
-	go cp(b, &up, a)
-	go cp(a, &down, b)
+	safego.Go("tunnel-up", log, func() { cp(b, &up, a) })
+	safego.Go("tunnel-down", log, func() { cp(a, &down, b) })
 
 	finished := make(chan struct{})
 	defer close(finished)
@@ -303,7 +304,7 @@ func tunnel(ctx context.Context, cancel context.CancelFunc, a, b net.Conn, idleT
 	}
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
-	go func() {
+	safego.Go("idle-watchdog", log, func() {
 		var lastUp, lastDown int64 = -1, -1
 		for {
 			select {
@@ -323,7 +324,7 @@ func tunnel(ctx context.Context, cancel context.CancelFunc, a, b net.Conn, idleT
 				lastUp, lastDown = cu, cd
 			}
 		}
-	}()
+	})
 
 	u, d := <-done, <-done
 	cancel() // 任一方向结束后取消 ctx，促使另一方向的 watchdog/读写尽快收尾

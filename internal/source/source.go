@@ -3,6 +3,8 @@
 package source
 
 import (
+	"github.com/mabw/light-github/internal/safego"
+
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -270,13 +272,14 @@ func (m *Manager) Refresh(ctx context.Context) ([]rule.Rule, error) {
 
 	for i, src := range m.sources {
 		wg.Add(1)
-		go func(order int, src Fetcher) {
+		i, src := i, src
+		safego.Go("source-fetch", nil, func() {
 			defer wg.Done()
 			rules, err := src.Fetch(ctx)
 			mu.Lock()
 			defer mu.Unlock()
-			results = append(results, fetchResult{order: order, rules: rules, err: err})
-		}(i, src)
+			results = append(results, fetchResult{order: i, rules: rules, err: err})
+		})
 	}
 	wg.Wait()
 
