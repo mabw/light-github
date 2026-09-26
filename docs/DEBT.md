@@ -77,6 +77,13 @@
 
 - **位置**：`internal/sysproxy/sysproxy_windows.go`、`sysproxy_linux.go`
 - **描述**：macOS 分支已完整验证（接入/还原/退出闭环）；Windows 用 `reg add/delete AutoConfigURL`（WinINET 可能需 InternetSetOption 广播才即时生效），Linux 仅支持 GNOME gsettings（KDE 无统一接口）。
+- **进展（2026-09-26）**：linux 分支命令行为已有单元测试覆盖（`sysproxy_linux_test.go`，gsettings 断言），并在 linux 容器与本机双环境通过；仍缺真机 GNOME 桌面的端到端验证。
+- **真机验证清单**（用 release 产物逐项过）：
+  - [ ] GNOME：托盘/控制台开启系统代理 → `gsettings get org.gnome.system.proxy mode` 为 `'auto'`，浏览器走 PAC
+  - [ ] GNOME：退出 → mode 还原 `'none'`
+  - [ ] KDE：开启应得到「仅支持 GNOME」报错而非假成功
+  - [ ] Windows：开启 → `reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v AutoConfigURL` 有值，**浏览器是否即时生效**（不即时 = WinINET 未广播，需改 syscall InternetSetOption）
+  - [ ] Windows：退出 → AutoConfigURL 删除且浏览器恢复直连
 - **影响**：M4 三平台分发前必须真机过一遍；WinINET 即时生效问题可能需要改用 syscall（InternetSetOption）。
 - **目标**：M4。
 
@@ -84,6 +91,14 @@
 
 - **位置**：`internal/tray/tray.go`（systray 交互）、`internal/autostart/autostart_windows.go`、`autostart_linux.go`
 - **描述**：macOS 全项实测（图标/菜单/开关闭环/退出清理）。未验证部分：① Windows/Linux 的 systray 菜单渲染与回调（XDG AppIndicator 依赖桌面环境）；② **非 darwin 平台的 `systray.Quit()` 语义**——darwin 是进程终止，Win/Linux 上 `systray.Run` 可能正常返回、`shutdown()` 由 main 底部兜底执行（`sync.Once` 已防重，逻辑上闭环，未实测）；③ HKCU Run / XDG autostart 写入效果。
+- **进展（2026-09-26）**：linux autostart 的 XDG 条目写入/删除/幂等已有单元测试（`autostart_linux_test.go`，linux 容器通过）；托盘与注册表项仍需真机。
+- **真机验证清单**（用 release 产物逐项过）：
+  - [ ] Windows：托盘图标渲染、三开关勾选状态、打开控制台
+  - [ ] Windows：托盘「退出」→ 进程结束且系统代理已还原（验证 Quit 语义闭环）
+  - [ ] Windows：勾选开机自启 → 注册表 Run 键出现；重启登录后自动拉起
+  - [ ] GNOME：AppIndicator 扩展下托盘菜单可用（无扩展时图标不显示属预期，`-no-tray` 兜底）
+  - [ ] Linux：勾选开机自启 → `~/.config/autostart/light-github.desktop` 生成；注销重登后拉起
+  - [ ] Linux：托盘「退出」→ 进程结束、PAC 还原（Quit 语义闭环）
 - **影响**：M4 三平台分发前真机过一遍；若 Win/Linux 上 Quit 后 Run 不返回，需在 `tray.Run` 返回路径上加超时兜底。
 - **目标**：M4。
 

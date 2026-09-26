@@ -16,6 +16,8 @@
 
 ## 快速开始
 
+安装预编译产物见 [docs/INSTALL.md](docs/INSTALL.md)（macOS / Windows / Linux）；从源码构建：
+
 ```bash
 go build -o light-github ./cmd/light-github && ./light-github
 # 或直接
