@@ -27,7 +27,7 @@ const dialTimeout = 5 * time.Second
 // fixedRules 白名单：域名 → 固定出口 IP。
 // IP 来自 steampp 数据实测（DESIGN.md §3.3 数据源归一化规则）。
 var fixedRules = map[string]string{
-	"github.com":     "20.207.73.82",  // steampp「Github 网站」Forward 固定 IP
+	"github.com":     "20.207.73.82",   // steampp「Github 网站」Forward 固定 IP
 	"api.github.com": "20.205.243.168", // githubapi.rmbgame.net CNAME 链解析结果
 }
 

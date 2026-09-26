@@ -24,7 +24,7 @@ import (
 
 // dohEndpoints 国内可达的 DoH JSON 端点（RFC 8484 的 JSON 变体，GET 即用）
 var dohEndpoints = []string{
-	"https://223.5.5.5/resolve",  // 阿里公共 DNS
+	"https://223.5.5.5/resolve",    // 阿里公共 DNS
 	"https://120.53.53.53/resolve", // DNSPod
 	"https://doh.pub/resolve",      // DNSPod（域名形态）
 }
@@ -37,7 +37,7 @@ var testDomains = []string{
 }
 
 const (
-	probeCount   = 3              // 每 IP 测速次数
+	probeCount   = 3               // 每 IP 测速次数
 	probeTimeout = 1 * time.Second // 单次超时，失败按 1000ms 记（GitHub520 同款）
 )
 

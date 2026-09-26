@@ -63,10 +63,10 @@ const (
 )
 
 type rule struct {
-	Domain      string
-	Kind        strategyKind
-	Forward     string // FixedIP: IP；CNAME: 查询域名；Dynamic: 空
-	FakeSNI     string
+	Domain  string
+	Kind    strategyKind
+	Forward string // FixedIP: IP；CNAME: 查询域名；Dynamic: 空
+	FakeSNI string
 }
 
 func (r rule) String() string {
