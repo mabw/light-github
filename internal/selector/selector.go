@@ -57,8 +57,9 @@ type candidate struct {
 type domainState struct {
 	mu          sync.Mutex // DEBT-4：域名级分片锁（测速期间仅阻塞同域名）
 	probedAt    time.Time
-	dirty       bool // 需重建（失败上报/规则换表置位）；不清 probedAt——Inspect 在重建前仍可展示旧数据
-	generations int  // 已重建次数：首个缓存用 firstTTL（短），第二个起用 steadyTTL（Watt 10s/100s 语义）
+	lastBuildAt time.Time // 最近一次重建时刻（冷却判定：深封锁期防每请求全量重测）
+	dirty       bool      // 需重建（失败上报/规则换表置位）；不清 probedAt——Inspect 在重建前仍可展示旧数据
+	generations int       // 已重建次数：首个缓存用 firstTTL（短），第二个起用 steadyTTL（Watt 10s/100s 语义）
 	candidates  []candidate
 }
 
@@ -84,6 +85,10 @@ type Selector struct {
 	firstTTL  time.Duration
 	steadyTTL time.Duration
 
+	// RebuildCooldown dirty 触发重建的最小间隔（防深封锁期重测风暴）；
+	// 零值用默认 5s。测试可注入短值。
+	RebuildCooldown time.Duration
+
 	tblMu sync.RWMutex // 规则表热更新（数据源刷新时 SetTable 换入）
 
 	mu     sync.Mutex // 仅保护 states map 的读写
@@ -95,13 +100,22 @@ type Selector struct {
 // 坏候选的淘汰上界，替代「失败摘除状态机」，调研 §3 采纳 #2）。
 func New(tbl *rule.Table, resolver Resolver, prober Prober, firstTTL, steadyTTL time.Duration) *Selector {
 	return &Selector{
-		tbl:       tbl,
-		resolver:  resolver,
-		prober:    prober,
-		firstTTL:  firstTTL,
-		steadyTTL: steadyTTL,
-		states:    map[string]*domainState{},
+		tbl:             tbl,
+		resolver:        resolver,
+		prober:          prober,
+		firstTTL:        firstTTL,
+		steadyTTL:       steadyTTL,
+		RebuildCooldown: 5 * time.Second,
+		states:          map[string]*domainState{},
 	}
+}
+
+// cooldown 返回生效的重建冷却（零值回默认）。
+func (s *Selector) cooldown() time.Duration {
+	if s.RebuildCooldown > 0 {
+		return s.RebuildCooldown
+	}
+	return 5 * time.Second
 }
 
 // SetTable 原子替换规则表并清空测速缓存时间戳（策略已变，
@@ -156,12 +170,21 @@ func (s *Selector) Pick(ctx context.Context, domain string) ([]net.IP, error) {
 	defer st.mu.Unlock()
 
 	if st.expired(time.Now(), s.firstTTL, s.steadyTTL) {
-		cands, err := s.buildCandidates(ctx, domain, st)
-		if err != nil && len(cands) == 0 {
-			return nil, err
+		// 重建冷却（深封锁期防抖）：dirty 循环（拨号失败→dirty→重建→测速
+		// 全灭→再失败）会让每个请求都在锁内同步全量重测（8 IP × 3 TCP +
+		// 8 HEAD，秒级），并发请求全部阻塞——冷却期内沿用旧候选，由拨号侧
+		// 快速失败兜底，冷却过后再重测
+		if st.dirty && !st.lastBuildAt.IsZero() && time.Since(st.lastBuildAt) < s.cooldown() {
+			// 沿用旧候选（可能全灭，拨号侧 4 候选快速 502）
+		} else {
+			cands, err := s.buildCandidates(ctx, domain, st)
+			if err != nil && len(cands) == 0 {
+				return nil, err
+			}
+			st.candidates, st.probedAt, st.dirty = cands, time.Now(), false
+			st.generations++
+			st.lastBuildAt = time.Now()
 		}
-		st.candidates, st.probedAt, st.dirty = cands, time.Now(), false
-		st.generations++
 	}
 
 	ordered := make([]candidate, len(st.candidates))

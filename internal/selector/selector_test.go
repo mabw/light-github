@@ -464,3 +464,25 @@ func TestPick_DuplicateSupplementDoesNotBlockBorrow(t *testing.T) {
 	}
 	t.Fatalf("重复补充不应阻断借段: %v", ips)
 }
+
+// M5-7：深封锁期 dirty 循环防抖——冷却期内重复 Pick 不再全量重测
+// （每请求在锁内同步测 8 IP×3TCP+8HEAD 会阻塞所有并发请求）
+func TestPick_DirtyRebuildCooldown(t *testing.T) {
+	res := &fakeResolver{ips: []net.IP{ip("1.1.1.1")}}
+	tbl := rule.NewTable([]rule.Rule{{Domain: "github.com", Kind: rule.KindDynamic}})
+	s := New(tbl, res, &fakeProber{}, time.Hour, time.Hour) // TTL 长期不过期，仅靠 dirty 触发
+	s.RebuildCooldown = 500 * time.Millisecond
+
+	_, _ = s.Pick(context.Background(), "github.com") // 首建（lastBuildAt 记时）
+	s.ReportFailure("github.com", ip("1.1.1.1"))      // dirty
+	_, _ = s.Pick(context.Background(), "github.com")
+	_, _ = s.Pick(context.Background(), "github.com")
+	if res.calls != 1 { // 冷却挡住首建后立即的 dirty，不重建
+		t.Fatalf("冷却期内不应重复重建: %d", res.calls)
+	}
+	time.Sleep(550 * time.Millisecond)
+	_, _ = s.Pick(context.Background(), "github.com")
+	if res.calls != 2 {
+		t.Fatalf("冷却过后应重建: %d", res.calls)
+	}
+}

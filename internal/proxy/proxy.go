@@ -103,6 +103,7 @@ type Server struct {
 const (
 	fastDialCandidates = 2
 	fastDialTimeout    = 2500 * time.Millisecond
+	maxDialAttempts    = 4
 )
 
 // SetEnabled 加速开关（托盘/控制台共用）。关闭后白名单失效、全部直通——
@@ -222,6 +223,10 @@ func (s *Server) handleConnect(ctx context.Context, cancel context.CancelFunc, c
 		}
 		var d net.Dialer
 		for i, ip := range ips {
+			if i >= maxDialAttempts {
+				break // 快速失败：深封锁期候选全灭时逐个试完要 35s+，
+				// 不如尽快 502 让客户端自行重试（浏览器重试体验远好于挂等）
+			}
 			if ctx.Err() != nil {
 				break // 客户端已断开，停止尝试后续候选
 			}

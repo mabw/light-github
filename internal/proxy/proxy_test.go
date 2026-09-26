@@ -511,3 +511,22 @@ func TestProxy_FirstCandidatesFailFast(t *testing.T) {
 		t.Fatalf("首候选应走快速超时档，实际总耗时 %v", el)
 	}
 }
+
+// M5-7：候选全灭时最多试 maxDialAttempts 个即 502——逐个试完 8 个要 35s+，
+// 快速失败让浏览器自行重试体验更好
+func TestProxy_CapsDialAttempts(t *testing.T) {
+	dialer := &fakeDialer{ips: []net.IP{
+		net.ParseIP("240.0.0.1"), net.ParseIP("240.0.0.2"), net.ParseIP("240.0.0.3"),
+		net.ParseIP("240.0.0.4"), net.ParseIP("240.0.0.5"), net.ParseIP("240.0.0.6"),
+	}}
+	proxyURL, srv := newStack(t, dialer)
+	srv.DialTimeout = 300 * time.Millisecond
+
+	resp, err := proxiedClient(t, proxyURL).Get("https://accel.test:443/")
+	if err == nil {
+		resp.Body.Close()
+	}
+	if len(dialer.failures) > 4 {
+		t.Fatalf("候选全灭应最多尝试 %d 个（快速失败），实际 %d", 4, len(dialer.failures))
+	}
+}
