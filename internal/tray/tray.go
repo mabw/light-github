@@ -9,16 +9,9 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
-	"sync"
-	"time"
 
 	"github.com/energye/systray"
 )
-
-// menuMu 保护菜单项读写：systray 库的 SetTitle/Check/Checked 是裸字段
-// （已核实 v1.0.3 无锁），ticker goroutine 与 Cocoa 主线程 click 回调
-// 并发触达会构成数据竞争（review H5）。
-var menuMu sync.Mutex
 
 // template 图标：GitHub Octicons mark-github（黑色 + alpha，256px 矢量直渲
 // 后 BOX 面积采样降至 32px）。macOS 经 SetTemplateIcon 自动适配浅/深菜单栏。
@@ -106,6 +99,10 @@ func Run(ctx context.Context, deps Deps, cleanup func()) error {
 	return nil
 }
 
+// onReady 全部菜单读写只发生在 AppKit 主线程（onReady/Click/SetOnClick 回调），
+// 单线程访问库的裸字段，既无数据竞争（原 review H5 由轮询 goroutine 引入）
+// 也无可死锁的跨线程锁（原 2s ticker 持锁调 native 曾与点击回调互等，
+// 造成托盘永久卡死，DEBT-9 实证）。
 func onReady(deps Deps) {
 	// 库 darwin 实现只用第一参数（单 PNG + setSize 16pt）：传 32px 源，
 	// retina @2x 原生像素匹配零缩放（16px 源会被系统上采样→糊/毛刺，实证）
@@ -124,59 +121,70 @@ func onReady(deps Deps) {
 	systray.AddSeparator()
 	quit := systray.AddMenuItem(menuQuit, "还原系统代理并退出")
 
-	// macOS 左键点击默认无行为，需主动弹菜单（spike-d 实证）
-	systray.SetOnClick(func(menu systray.IMenu) { _ = menu.ShowMenu() })
+	// macOS 左键点击默认无行为，需主动弹菜单（spike-d 实证）。
+	// 打开前刷新：每次点开看到的必是当下状态（替代定时轮询——
+	// 外部（Web 控制台/配置热应用）改动由下一次打开纠正，无陈旧窗口）。
+	systray.SetOnClick(func(menu systray.IMenu) {
+		refreshMenu(deps, m)
+		_ = menu.ShowMenu()
+	})
 
-	m.accel.Click(func() { toggleUnderLock(deps, m, func() { deps.ToggleAccel(!m.accel.Checked()) }) })
+	m.accel.Click(func() { toggleMenu(deps, m, func() { deps.ToggleAccel(!m.accel.Checked()) }) })
 	if deps.ToggleSysProxy != nil {
-		m.sys.Click(func() { toggleUnderLock(deps, m, func() { _ = deps.ToggleSysProxy(!m.sys.Checked()) }) })
+		m.sys.Click(func() { toggleMenu(deps, m, func() { _ = deps.ToggleSysProxy(!m.sys.Checked()) }) })
 	}
 	if deps.ToggleAutostart != nil {
-		m.auto.Click(func() { toggleUnderLock(deps, m, func() { _ = deps.ToggleAutostart(!m.auto.Checked()) }) })
+		m.auto.Click(func() { toggleMenu(deps, m, func() { _ = deps.ToggleAutostart(!m.auto.Checked()) }) })
 	}
 	open.Click(deps.OpenUI)
 	quit.Click(deps.Quit)
 
-	syncMenu(deps, m)
-	go func() {
-		t := time.NewTicker(2 * time.Second)
-		defer t.Stop()
-		for range t.C {
-			syncMenu(deps, m)
-		}
-	}()
+	refreshMenu(deps, m)
 }
 
-// toggleUnderLock 读 Checked → 执行动作 → 刷新菜单，全程持锁：
-// 与 ticker 的 syncMenu 互斥，消除库裸字段上的并发读写（review H5）。
-func toggleUnderLock(deps Deps, m menuSet, action func()) {
-	menuMu.Lock()
-	defer menuMu.Unlock()
+// toggleMenu 点击回调路径：执行动作（IO 在主线程，正常毫秒级）后同步刷新。
+// 网络异常时 SysProxyState 的 networksetup 查询最坏阻塞数秒——菜单迟钝
+// 但不再死锁（DEBT-9 的底线：单线程内等待永远可解）。
+func toggleMenu(deps Deps, m menuSet, action func()) {
 	action()
-	syncMenuLocked(deps, m)
+	refreshMenu(deps, m)
 }
 
-// syncMenu 从回调拉取实际状态刷到菜单（回调失败/外部变更后被下一轮纠正）。
-func syncMenu(deps Deps, m menuSet) {
-	menuMu.Lock()
-	defer menuMu.Unlock()
-	syncMenuLocked(deps, m)
+// menuStates 三开关快照（IO 结果的纯数据，便于无 CGO 环境测试）。
+type menuStates struct {
+	accel bool
+	sys   bool
+	auto  bool
 }
 
-// syncMenuLocked 需持 menuMu 调用（读状态回调并写菜单项字段）。
-func syncMenuLocked(deps Deps, m menuSet) {
-	m.status.SetTitle(statusTitle(deps.AccelState()))
-	if deps.AccelState() {
+// snapshotStates 拉取三开关实际状态。SysProxyState 含 networksetup 查询
+// （TTL 缓存 3s），可选回调未注入时该状态落 false。
+func snapshotStates(deps Deps) menuStates {
+	s := menuStates{accel: deps.AccelState()}
+	if deps.SysProxyState != nil {
+		s.sys = deps.SysProxyState()
+	}
+	if deps.AutostartState != nil {
+		s.auto = deps.AutostartState()
+	}
+	return s
+}
+
+// refreshMenu 快照（IO）→ 应用（native）。仅在主线程调用。
+func refreshMenu(deps Deps, m menuSet) {
+	s := snapshotStates(deps)
+	m.status.SetTitle(statusTitle(s.accel))
+	if s.accel {
 		m.accel.Check()
 	} else {
 		m.accel.Uncheck()
 	}
-	if deps.SysProxyState != nil && deps.SysProxyState() {
+	if s.sys {
 		m.sys.Check()
 	} else {
 		m.sys.Uncheck()
 	}
-	if deps.AutostartState != nil && deps.AutostartState() {
+	if s.auto {
 		m.auto.Check()
 	} else {
 		m.auto.Uncheck()

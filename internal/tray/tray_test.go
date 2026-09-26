@@ -54,3 +54,26 @@ func TestTooltip(t *testing.T) {
 		t.Errorf("tooltip = %q", got)
 	}
 }
+
+// snapshotStates 可选回调未注入时状态落 false 而非 panic
+// （DEBT-9 重构：状态快照与菜单应用拆分，快照须可在无托盘环境测试）。
+func TestSnapshotStates_NilOptionalCallbacks(t *testing.T) {
+	deps := Deps{AccelState: func() bool { return true }}
+	s := snapshotStates(deps)
+	if !s.accel || s.sys || s.auto {
+		t.Fatalf("可选回调缺省应全 false（accel 除外）: %+v", s)
+	}
+}
+
+// snapshotStates 三个回调齐全时如实采集。
+func TestSnapshotStates_AllCallbacks(t *testing.T) {
+	deps := Deps{
+		AccelState:     func() bool { return false },
+		SysProxyState:  func() bool { return true },
+		AutostartState: func() bool { return true },
+	}
+	s := snapshotStates(deps)
+	if s.accel || !s.sys || !s.auto {
+		t.Fatalf("快照与回调不符: %+v", s)
+	}
+}
