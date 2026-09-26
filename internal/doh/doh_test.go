@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -113,5 +114,81 @@ func TestResolve_ContextCancelAborts(t *testing.T) {
 	}
 	if time.Since(start) > time.Second {
 		t.Fatal("应随 ctx 及时中止，而不是等满服务端延迟")
+	}
+}
+
+// ---- M5 §2.4：结果缓存——同域名 TTL 内二次 Resolve 不再发 HTTP ----
+
+func newCountingServer(t *testing.T, calls *atomic.Int64) *httptest.Server {
+	t.Helper()
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = w.Write([]byte(`{"Answer":[{"type":1,"data":"8.8.8.8"}]}`))
+	}))
+	t.Cleanup(s.Close)
+	return s
+}
+
+func TestResolve_CachesWithinTTL(t *testing.T) {
+	var calls atomic.Int64
+	c := New(newCountingServer(t, &calls).URL)
+
+	if _, err := c.Resolve(context.Background(), "x.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Resolve(context.Background(), "x.com"); err != nil {
+		t.Fatal(err)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("TTL 内应命中缓存，实际发请求 %d 次", n)
+	}
+
+	// 不同域名不共享缓存条目
+	if _, err := c.Resolve(context.Background(), "y.com"); err != nil {
+		t.Fatal(err)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("不同域名应独立查询: %d", n)
+	}
+}
+
+func TestResolve_CacheExpires(t *testing.T) {
+	var calls atomic.Int64
+	c := New(newCountingServer(t, &calls).URL)
+	c.CacheTTL = 40 * time.Millisecond // 注入短 TTL（含 ±10% 抖动，60ms 必过期）
+
+	_, _ = c.Resolve(context.Background(), "x.com")
+	_, _ = c.Resolve(context.Background(), "x.com")
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("TTL 内应命中缓存: %d", n)
+	}
+	time.Sleep(60 * time.Millisecond)
+	if _, err := c.Resolve(context.Background(), "x.com"); err != nil {
+		t.Fatal(err)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("过期后应重新查询: %d", n)
+	}
+}
+
+// 失败不缓存（端点故障恢复后立即可用）
+func TestResolve_FailureNotCached(t *testing.T) {
+	var calls atomic.Int64
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if n == 1 {
+			w.WriteHeader(500)
+			return
+		}
+		_, _ = w.Write([]byte(`{"Answer":[{"type":1,"data":"8.8.8.8"}]}`))
+	}))
+	t.Cleanup(s.Close)
+	c := New(s.URL)
+
+	if _, err := c.Resolve(context.Background(), "x.com"); err == nil {
+		t.Fatal("首次应失败")
+	}
+	if _, err := c.Resolve(context.Background(), "x.com"); err != nil {
+		t.Fatalf("失败不应被缓存，二次应成功: %v", err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -25,10 +26,27 @@ var defaultEndpoints = []string{
 	"https://doh.360.cn/resolve",   // 360
 }
 
+// defaultCacheTTL 结果缓存默认有效期。取 9.5min 而非整 10min，且每条目
+// 独立 ±10% 抖动（调研 §2.4，Watt 同思路 9.9min）：避免大量域名同时过期
+// 造成对 DoH 端点的解析风暴。
+const defaultCacheTTL = 9*time.Minute + 30*time.Second
+
+type cacheEntry struct {
+	ips      []net.IP
+	expireAt time.Time
+}
+
 // Client 多端点 DoH 解析器。
 type Client struct {
 	endpoints []string
 	hc        *http.Client
+
+	// CacheTTL 结果缓存有效期；零值用默认 9.5min。仅缓存成功结果，
+	// 失败不缓存（端点故障恢复后立即可用）。
+	CacheTTL time.Duration
+
+	mu    sync.Mutex
+	cache map[string]cacheEntry
 }
 
 // New 构造客户端；endpoints 为空时使用内置默认端点。
@@ -39,7 +57,33 @@ func New(endpoints ...string) *Client {
 	return &Client{
 		endpoints: endpoints,
 		hc:        &http.Client{Timeout: 3 * time.Second},
+		cache:     map[string]cacheEntry{},
 	}
+}
+
+func (c *Client) cacheTTL() time.Duration {
+	if c.CacheTTL > 0 {
+		return c.CacheTTL
+	}
+	return defaultCacheTTL
+}
+
+func (c *Client) cached(domain string) ([]net.IP, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.cache[domain]
+	if !ok || time.Now().After(e.expireAt) {
+		return nil, false
+	}
+	return e.ips, true
+}
+
+func (c *Client) store(domain string, ips []net.IP) {
+	ttl := c.cacheTTL()
+	jitter := time.Duration(float64(ttl) * (0.9 + 0.2*rand.Float64())) // ±10%
+	c.mu.Lock()
+	c.cache[domain] = cacheEntry{ips: ips, expireAt: time.Now().Add(jitter)}
+	c.mu.Unlock()
 }
 
 type dohAnswer struct {
@@ -56,7 +100,12 @@ type dohResp struct {
 // 的答案（review M3：原取全端点并集，任一被污染端点的假 IP 都会进入
 // 候选池——TCP 测速只校验握手耗时无法识别身份）。失败降级到下一家，
 // 全部失败返回错误。端点顺序即信任序（cmd 构造时阿里/DNSPod 在前）。
+// 成功结果按 CacheTTL 缓存（M5 §2.4）。
 func (c *Client) Resolve(ctx context.Context, domain string) ([]net.IP, error) {
+	if ips, ok := c.cached(domain); ok {
+		return ips, nil
+	}
+
 	results := make([][]net.IP, len(c.endpoints))
 	var wg sync.WaitGroup
 	for i, ep := range c.endpoints {
@@ -72,6 +121,7 @@ func (c *Client) Resolve(ctx context.Context, domain string) ([]net.IP, error) {
 
 	for _, ips := range results { // 信任序采纳
 		if len(ips) > 0 {
+			c.store(domain, ips)
 			return ips, nil
 		}
 	}
