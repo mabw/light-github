@@ -200,6 +200,7 @@ type Rule struct {
 | **M4 发布** ✅ 2026-09-26（v0.4.0） | goreleaser 四目标 + GitHub Actions（CI 双平台矩阵 + tag 发布）+ 安装文档 | [v0.4.0](https://github.com/mabw/light-github/releases/tag/v0.4.0) 四产物 + checksums；darwin amd64 用 `clang -arch` 交叉（Intel runner 已退役）；Windows/Linux 真机验证 → DEBT-7/8 |
 | **M5 稳定性** ✅ 2026-09-26（v0.5.0） | 选路 TLS 级验证 + 生命周期回收（首 10s/稳态 100s）+ 失败即时失效 + 拨号分级超时（前 2 候选 2.5s）+ DoH 缓存 + safego 协程防护 | 决策依据见 [RESEARCH-WATT-STABILITY.md](RESEARCH-WATT-STABILITY.md)；连带修复测速黑洞拨号 bug（单用例 225s→0.9s） |
 | **M5.1 封锁实战追加** ✅ 2026-09-26（v0.6.0） | 同名 FixedIP 多源并集 + 借段兜底（同根域家族）+ 应用层测速验证（HEAD+响应码，"Whoa there!" 400 淘汰）+ 拨号上限 4 快速失败 + 重建冷却 5s + **深封锁直连兜底**（候选全灭退化为系统解析直连——实测封锁为新建连接高丢包，直连 TCP 硬扛优于代理快速 502，工具下界=直连）+ **波动期降级记忆**（连续 3 次拨号链失败→30s 窗口直接兜底）+ dialMs 观测修复 | 2026-09-26 两次真实封锁期驱动；Reprobe/SetTable 旁路冷却（冷却合入回归修复） |
+| **M5.3 借段收缩** ✅ 2026-09-26（v0.6.3） | 借段只对根域开放（rootDomain==domain）：子域服务（api.github.com 有专属服务 IP）借根域/web 前端 IP 只会得到 301 跨域路由——拨号"成功"但隧道内全是错误响应，零解密架构无感知、ReportFailure 不触发（octotree 全挂的第二层根因；借段是 M5-10/M5-11/M5-12 三个 bug 的共同源头） | 子域主候选全灭由直连兜底接管：显式慢优于隐性错 |
 | **M5.2 测速内容指纹** ✅ 2026-09-26（v0.6.1/v0.6.2） | 应用层验证升级内容指纹与重定向判定：`200 + 裸 text/plain` 判死——GitHub 边缘存在独立健康节点（实测 140.82.114.22，泛证书 TLS 合法、任意路径秒回 200 "OK"），只看状态码会判其最优导致全部流量得到裸 "OK" 页；**禁用重定向跟随 + 3xx 判死**——web 前端 IP 对 api.github.com 回 301 到 github.com/（跨域路由，且按 IP 分工路由会漂移），默认跟随把「301 到别域」洗成「最终 200」判活，octotree 的 API 全拿到 HTML | 测速验证层级：TCP→TLS→状态码→重定向→内容指纹，五层全部实战喂出 |
 
 ### 6.1 M2 架构要点（2026-09-25 定稿实现）
