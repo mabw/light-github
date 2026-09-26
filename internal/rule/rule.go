@@ -132,14 +132,8 @@ func (t *Table) MatchAll(domain string) []Rule {
 	return nil
 }
 
-// AllFixedIPs 返回表内全部 FixedIP 的 Forward（原始规则序，含重复）。
-// 借段兜底的数据源（M5-6）：GitHub520 的测速优选 IP 分布在各域名规则里。
-func (t *Table) AllFixedIPs() []string {
-	var out []string
-	for _, r := range t.all {
-		if r.Kind == KindFixedIP {
-			out = append(out, r.Forward)
-		}
-	}
-	return out
+// AllRules 返回构建表的原始规则序。借段兜底需按 Domain 判同根域家族
+// （M5-6）：GitHub520 的测速优选 IP 分布在各域名规则里。
+func (t *Table) AllRules() []Rule {
+	return t.all
 }

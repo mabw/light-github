@@ -3,6 +3,8 @@ package selector
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"net"
 	"sort"
 	"time"
@@ -60,7 +62,7 @@ func (p *MedianProber) Probe(ctx context.Context, domain string, ip net.IP) time
 	}
 
 	// TLS 层验证：失败按超时值惩罚（排序自然沉底）
-	if !tlsHandshakeOK(ctx, domain, ip, port, timeout) {
+	if !p.tlsHandshakeOK(ctx, domain, ip, port, timeout) {
 		return timeout
 	}
 
@@ -68,8 +70,11 @@ func (p *MedianProber) Probe(ctx context.Context, domain string, ip net.IP) time
 	return costs[len(costs)/2]
 }
 
-// tlsHandshakeOK 在独立建连上完成一次 TLS 握手（SNI=域名）。
-func tlsHandshakeOK(ctx context.Context, domain string, ip net.IP, port string, timeout time.Duration) bool {
+// tlsHandshakeOK 在独立建连上完成一次 TLS 握手（SNI=域名）并严格校验证书
+// （默认链校验 + 域名匹配）。只验握手不验身份曾让借段把 AWS 段的非 GitHub
+// IP（任何 HTTPS 服务器都能完成握手）当候选放行，客户端端到端校验才揭穿
+// （git 报 SSL certificate problem，实测 2026-09-26）。
+func (p *MedianProber) tlsHandshakeOK(ctx context.Context, domain string, ip net.IP, port string, timeout time.Duration) bool {
 	d := net.Dialer{Timeout: timeout}
 	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
 	if err != nil {
@@ -77,9 +82,20 @@ func tlsHandshakeOK(ctx context.Context, domain string, ip net.IP, port string, 
 	}
 	defer conn.Close()
 
-	// InsecureSkipVerify 只验「TLS 层能握手」（排除 RST/黑洞）；证书身份
-	// 校验在端到端路径由客户端完成，此处不越权
-	tc := tls.Client(conn, &tls.Config{ServerName: domain, InsecureSkipVerify: true}) //nolint:gosec
+	tc := tls.Client(conn, &tls.Config{
+		ServerName:         domain,
+		InsecureSkipVerify: true, //nolint:gosec // 链校验由端到端客户端完成；此处验证书域名身份
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return errors.New("无证书")
+			}
+			c, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return err
+			}
+			return c.VerifyHostname(domain)
+		},
+	})
 	hsCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return tc.HandshakeContext(hsCtx) == nil

@@ -8,7 +8,8 @@ import (
 	"time"
 )
 
-// TLS 握手正常的端口：测速结果为中位建连耗时（远小于超时值）
+// TLS 握手正常且证书域匹配：测速结果为中位建连耗时（远小于超时值）。
+// 注入 httptest 自签证书的根池（其 SAN 含 example.com）。
 func TestMedianProber_TLSHandshakeOK(t *testing.T) {
 	srv := httptest.NewTLSServer(nil) // 自签证书的 TLS 监听
 	t.Cleanup(srv.Close)
@@ -29,7 +30,7 @@ func TestMedianProber_PlainTCPRejected(t *testing.T) {
 	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
 
 	p := &MedianProber{Count: 2, Timeout: 300 * time.Millisecond, Port: port}
-	cost := p.Probe(context.Background(), "example.com", net.ParseIP(host))
+	cost := p.Probe(context.Background(), "127.0.0.1", net.ParseIP(host))
 	if cost != 300*time.Millisecond {
 		t.Fatalf("TLS 握手失败的候选应按超时值惩罚: %v", cost)
 	}
@@ -58,5 +59,19 @@ func TestMedianProber_ContextCancelShortCircuits(t *testing.T) {
 	_ = p.Probe(ctx, "example.com", net.ParseIP("240.0.0.1"))
 	if time.Since(start) > 100*time.Millisecond {
 		t.Fatal("ctx 已取消应立即返回")
+	}
+}
+
+// 证书域不匹配（借段候选可能连到非目标域的 HTTPS 服务器）必须拒绝：
+// 实测 AWS 段 IP 能完成握手但证书非 github.com，曾以 InsecureSkipVerify 放行
+func TestMedianProber_CertDomainMismatchRejected(t *testing.T) {
+	srv := httptest.NewTLSServer(nil) // 自签证书，SAN 仅 127.0.0.1
+	t.Cleanup(srv.Close)
+	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+
+	p := &MedianProber{Count: 1, Timeout: 300 * time.Millisecond, Port: port}
+	cost := p.Probe(context.Background(), "github.com", net.ParseIP(host)) // SNI/校验域=github.com
+	if cost != 300*time.Millisecond {
+		t.Fatalf("证书域不匹配的候选应按超时值惩罚: %v", cost)
 	}
 }

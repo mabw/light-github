@@ -420,8 +420,11 @@ func TestPick_BorrowSiblingsWhenPrimaryScarce(t *testing.T) {
 	if !has("20.207.1.1") || !has("20.205.1.1") {
 		t.Fatalf("主候选应保留: %v", ips)
 	}
-	if !has("140.82.1.1") || !has("185.199.1.1") {
-		t.Fatalf("主候选稀缺时应借段补充兄弟 FixedIP: %v", ips)
+	if !has("140.82.1.1") { // collector.github.com：同根域家族（github.com），可借
+		t.Fatalf("主候选稀缺时应借同家族 FixedIP: %v", ips)
+	}
+	if has("185.199.1.1") { // avatars.githubusercontent.com：跨根域，不借
+		t.Fatalf("跨根域 IP 不应借段（应用层不服务目标域）: %v", ips)
 	}
 
 	// 主候选充足（≥3）的域不借段——避免无谓扩大候选

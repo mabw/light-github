@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -325,22 +326,31 @@ func (s *Selector) candidateIPs(ctx context.Context, domain string) ([]net.IP, e
 		}
 	}
 
-	// 借段兜底：主候选稀缺（去重后）时补充表内其他 FixedIP
+	// 借段兜底：主候选稀缺（去重后）时补充同根域家族的 FixedIP
 	if len(deduped) <= borrowThreshold {
-		deduped = append(deduped, s.borrowedIPs(deduped)...)
+		deduped = append(deduped, s.borrowedIPs(domain, deduped)...)
 	}
 	return deduped, nil
 }
 
-// borrowedIPs 表内其他 FixedIP 样本（原始规则序，去重已有，最多 maxBorrowed 个）。
-func (s *Selector) borrowedIPs(have []net.IP) []net.IP {
+// borrowedIPs 表内**同根域家族**其他 FixedIP（原始规则序，去重已有，≤maxBorrowed 个）。
+// 家族限定（registrable domain 后两段相等）：github.com 只借 *.github.com 的 IP
+// （alive/central/collector 等 140.82 段，同前端服务主站）；跨服务域不借——
+// 实测 github.dev(20.43)/hub.docker(54.208)/github.io(185.199) 的 IP 虽然
+// TLS 可握手甚至证书匹配（*.github.com 泛证书），应用层回 400/403
+// （GitHub 边缘按 IP 分工路由，"Whoa there!" 页面即此）。
+func (s *Selector) borrowedIPs(domain string, have []net.IP) []net.IP {
+	family := rootDomain(domain)
 	seen := make(map[string]bool, len(have))
 	for _, ip := range have {
 		seen[ip.String()] = true
 	}
 	var out []net.IP
-	for _, fwd := range s.currentTable().AllFixedIPs() {
-		ip := net.ParseIP(fwd)
+	for _, r := range s.currentTable().AllRules() {
+		if r.Kind != rule.KindFixedIP || rootDomain(r.Domain) != family {
+			continue
+		}
+		ip := net.ParseIP(r.Forward)
 		if ip == nil || seen[ip.String()] {
 			continue
 		}
@@ -351,6 +361,17 @@ func (s *Selector) borrowedIPs(have []net.IP) []net.IP {
 		}
 	}
 	return out
+}
+
+// rootDomain 根域（后两段）：alive.github.com → github.com。
+// 简化判定对本工具的域集合足够（github.com/githubusercontent.com 等
+// 均两段根域）；公后缀（com.cn 类）不存在于加速清单。
+func rootDomain(d string) string {
+	parts := strings.Split(d, ".")
+	if len(parts) <= 2 {
+		return d
+	}
+	return parts[len(parts)-2] + "." + parts[len(parts)-1]
 }
 
 func sinkRank(c candidate) int {
