@@ -38,10 +38,13 @@ import (
 )
 
 const (
-	version            = "0.3.0"
 	steamppAPI         = "https://api.steampp.net/accelerator/projectgroups"
 	github520HostsJSON = "https://raw.hellogithub.com/hosts.json"
 )
+
+// version 版本号：发布构建经 -ldflags "-X main.version=<tag>" 注入；
+// 本地 go build / go test 用此默认值（var 而非 const，-X 只能写入变量）。
+var version = "0.4.0"
 
 func main() {
 	var (
@@ -54,7 +57,7 @@ func main() {
 	)
 	flag.Parse()
 	if *showVersion {
-		fmt.Println("light-github " + version + " (M3)")
+		fmt.Println("light-github " + version)
 		return
 	}
 
