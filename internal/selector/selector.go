@@ -354,8 +354,12 @@ func (s *Selector) candidateIPs(ctx context.Context, domain string) ([]net.IP, e
 		}
 	}
 
-	// 借段兜底：主候选稀缺（去重后）时补充同根域家族的 FixedIP
-	if len(deduped) <= borrowThreshold {
+	// 借段兜底：主候选稀缺（去重后）且**目标本身是根域**时补充同根域家族
+	// 的 FixedIP。子域不借（M5-12）：子域服务（api.github.com 等）有专属
+	// 服务 IP，借根域/web 前端的 IP 只会得到 301 跨域路由——拨号"成功"
+	// 但隧道内全是错误响应，零解密架构无感知（2026-09-26 实测 octotree
+	// 全挂的机制；健康节点 bug 的 IP 同样是借来的）
+	if len(deduped) <= borrowThreshold && rootDomain(domain) == domain {
 		deduped = append(deduped, s.borrowedIPs(domain, deduped)...)
 	}
 	return deduped, nil

@@ -489,3 +489,27 @@ func TestPick_DirtyRebuildCooldown(t *testing.T) {
 		t.Fatalf("冷却过后应重建: %d", res.calls)
 	}
 }
+
+// M5-12：借段只对根域开放——子域服务（api.github.com 有专属服务 IP）借
+// 根域/web 前端的 IP 只会得到 301 跨域路由（2026-09-26 实测：github.com 的
+// 20.207.73.82 被借给 api.github.com，拨号"成功"但隧道里全是 301 HTML，
+// 零解密架构无感知；GitHub 边缘路由漂移 + TTL 窗口内测速快照错配）。
+func TestPick_SubdomainDoesNotBorrow(t *testing.T) {
+	res := &fakeResolver{ips: []net.IP{ip("20.205.1.1")}} // 单一主候选（稀缺）
+	tbl := rule.NewTable([]rule.Rule{
+		{Domain: "api.github.com", Kind: rule.KindFixedIP, Forward: "20.205.1.1"},
+		{Domain: "github.com", Kind: rule.KindFixedIP, Forward: "20.207.9.9"},
+		{Domain: "collector.github.com", Kind: rule.KindFixedIP, Forward: "140.82.9.9"},
+	})
+	s := New(tbl, res, &fakeProber{}, 10*time.Second, 5*time.Minute)
+
+	ips, err := s.Pick(context.Background(), "api.github.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range ips {
+		if x.String() == "20.207.9.9" || x.String() == "140.82.9.9" {
+			t.Fatalf("子域不应借段（借来的 IP 不服务该域，301 隐性故障）: %v", ips)
+		}
+	}
+}
