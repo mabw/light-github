@@ -1,0 +1,53 @@
+# CI：push/PR → 双平台测试矩阵 + lint + 交叉编译门
+# macos 跑 darwin 分支（CGO/tray/autostart）；ubuntu 真实执行 linux 分支
+# （sysproxy gsettings / autostart XDG 用例，DEBT-7 部分前提验证）
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::以下文件未格式化"; echo "$unformatted"; exit 1
+          fi
+
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+
+      - run: go vet ./...
+      - run: go test -race ./...
+
+      # 交叉编译门：平台分支的测试文件必须可编译（parseServices 教训）
+      - name: cross vet (windows/linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go vet ./...
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./...
+
+      # 四目标构建冒烟（复用 goreleaser 配置，不发布）
+      - name: build all targets
+        if: matrix.os == 'macos-latest'
+        run: goreleaser build --snapshot --clean

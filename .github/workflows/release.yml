@@ -1,0 +1,32 @@
+# Release：tag v* → goreleaser 发布四平台产物
+# 单 macos job 出全部目标：darwin 走 CGO（arm64 原生 / amd64 clang -arch 交叉），
+# windows/linux CGO=0 在 macOS 上交叉编译（本机已实证）。
+# Linux runner 上的 gsettings/godbus 交叉细节无需介入——CGO=0 时纯 Go。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # 创建 Release 与上传产物
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # changelog 需要完整 tag 历史
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
