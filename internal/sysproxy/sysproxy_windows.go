@@ -14,20 +14,28 @@ const regPath = `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Setting
 // Enable 设置 PAC 自动代理（AutoConfigURL）。
 func Enable(pacURL string) error {
 	_, err := execRun("reg", "add", regPath, "/v", "AutoConfigURL", "/t", "REG_SZ", "/d", pacURL, "/f")
+	if err == nil {
+		invalidateState()
+	}
 	return err
 }
 
 // Disable 删除 AutoConfigURL（还原）。失败上抛（review H3：吞错会假成功）。
 func Disable() error {
 	_, err := execRun("reg", "delete", regPath, "/v", "AutoConfigURL", "/f")
+	if err == nil {
+		invalidateState()
+	}
 	return err
 }
 
-// Enabled AutoConfigURL 当前值等于 pacURL 时返回 true。
+// Enabled AutoConfigURL 当前值等于 pacURL 时返回 true（TTL 缓存，review H2）。
 func Enabled(pacURL string) bool {
-	out, err := execRun("reg", "query", regPath, "/v", "AutoConfigURL")
-	if err != nil {
-		return false
-	}
-	return strings.Contains(out, pacURL)
+	return enabledCached(func() bool {
+		out, err := execRun("reg", "query", regPath, "/v", "AutoConfigURL")
+		if err != nil {
+			return false
+		}
+		return strings.Contains(out, pacURL)
+	})
 }

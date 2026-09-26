@@ -26,7 +26,11 @@ func withFake(t *testing.T) *fakeExec {
 	f := &fakeExec{}
 	old := execRun
 	execRun = f.run
-	t.Cleanup(func() { execRun = old })
+	invalidateState() // 隔离上一用例的 TTL 缓存（review H2 引入）
+	t.Cleanup(func() {
+		execRun = old
+		invalidateState()
+	})
 	return f
 }
 
@@ -104,7 +108,7 @@ func TestEnabled_MatchesURLAndState(t *testing.T) {
 	if !Enabled("http://127.0.0.1:12800/pac") {
 		t.Fatal("URL 匹配且启用应返回 true")
 	}
-	if Enabled("http://127.0.0.1:99999/pac") {
+	if enabledUncached("http://127.0.0.1:99999/pac") {
 		t.Fatal("URL 不匹配应返回 false")
 	}
 }
@@ -186,5 +190,76 @@ func TestExecRun_TimesOut(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("应按超时截断，实际耗时 %v", elapsed)
+	}
+}
+
+// ---- review H2：状态查询 TTL 缓存 ----
+
+func TestEnabled_TTLCache(t *testing.T) {
+	f := withFake(t)
+	queries := 0
+	f.respond = func(name string, args []string) (string, error) {
+		if strings.Contains(args[0], "listallnetworkservices") {
+			return svcList, nil
+		}
+		if strings.Contains(args[0], "-getautoproxyurl") {
+			queries++
+			return "URL: http://127.0.0.1:12800/pac\nEnabled: Yes\n", nil
+		}
+		return "", nil
+	}
+
+	if !Enabled("http://127.0.0.1:12800/pac") {
+		t.Fatal("首次查询")
+	}
+	n := queries
+	for i := 0; i < 5; i++ { // TTL 内重复查询不再 fork 子进程
+		if !Enabled("http://127.0.0.1:12800/pac") {
+			t.Fatal("缓存值应保持 true")
+		}
+	}
+	if queries != n {
+		t.Fatalf("TTL 内应命中缓存：fork 次数 %d → %d", n, queries)
+	}
+
+	// TTL 过期后重新查询
+	old := stateTTL
+	stateTTL = time.Millisecond
+	t.Cleanup(func() { stateTTL = old })
+	time.Sleep(5 * time.Millisecond)
+	_ = Enabled("http://127.0.0.1:12800/pac")
+	if queries == n {
+		t.Fatal("过期后应重新查询")
+	}
+}
+
+// Enable 成功后立即查询不吃旧缓存（写路径主动失效）
+func TestEnabled_InvalidatedByWrite(t *testing.T) {
+	f := withFake(t)
+	enabled := false
+	f.respond = func(name string, args []string) (string, error) {
+		switch {
+		case strings.Contains(args[0], "listallnetworkservices"):
+			return svcList, nil
+		case strings.Contains(args[0], "-setautoproxyurl"):
+			enabled = true
+			return "", nil
+		case strings.Contains(args[0], "-getautoproxyurl"):
+			if enabled {
+				return "URL: http://127.0.0.1:12800/pac\nEnabled: Yes\n", nil
+			}
+			return "URL: \nEnabled: No\n", nil
+		}
+		return "", nil
+	}
+
+	if Enabled("http://127.0.0.1:12800/pac") {
+		t.Fatal("初始未接入")
+	}
+	if err := Enable("http://127.0.0.1:12800/pac"); err != nil {
+		t.Fatal(err)
+	}
+	if !Enabled("http://127.0.0.1:12800/pac") {
+		t.Fatal("Enable 后立即查询不应命中旧缓存")
 	}
 }

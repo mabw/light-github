@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os/exec"
+	"sync"
 	"time"
 )
 
@@ -22,3 +23,39 @@ var execRun = func(name string, args ...string) (string, error) {
 	err := c.Run()
 	return out.String(), err
 }
+
+// ---- 状态查询缓存（review H2）----
+// 托盘 2s + 控制台 5s 轮询都调 Enabled，darwin 实现每次 fork 2+ 个
+// networksetup 子进程（24h 八万次量级）。TTL 缓存 + 写路径主动失效。
+
+var stateTTL = 3 * time.Second // 变量供测试缩短
+
+var (
+	stateMu  sync.Mutex
+	stateVal bool
+	stateAt  time.Time
+)
+
+// enabledCached 读穿透缓存：TTL 内直接返回上次结果。
+func enabledCached(uncached func() bool) bool {
+	stateMu.Lock()
+	if time.Since(stateAt) < stateTTL {
+		defer stateMu.Unlock()
+		return stateVal
+	}
+	stateMu.Unlock()
+
+	v := uncached()
+	stateMu.Lock()
+	stateVal, stateAt = v, time.Now()
+	stateMu.Unlock()
+	return v
+}
+
+// invalidateState 写路径（Enable/Disable 成功后）主动失效，防止读到陈旧状态。
+func invalidateState() {
+	stateMu.Lock()
+	stateAt = time.Time{}
+	stateMu.Unlock()
+}
+

@@ -9,10 +9,16 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/energye/systray"
 )
+
+// menuMu 保护菜单项读写：systray 库的 SetTitle/Check/Checked 是裸字段
+// （已核实 v1.0.3 无锁），ticker goroutine 与 Cocoa 主线程 click 回调
+// 并发触达会构成数据竞争（review H5）。
+var menuMu sync.Mutex
 
 // template 图标：GitHub Octicons mark-github（黑色 + alpha，256px 矢量直渲
 // 后 BOX 面积采样降至 32px）。macOS 经 SetTemplateIcon 自动适配浅/深菜单栏。
@@ -121,12 +127,12 @@ func onReady(deps Deps) {
 	// macOS 左键点击默认无行为，需主动弹菜单（spike-d 实证）
 	systray.SetOnClick(func(menu systray.IMenu) { _ = menu.ShowMenu() })
 
-	m.accel.Click(func() { deps.ToggleAccel(!m.accel.Checked()); syncMenu(deps, m) })
+	m.accel.Click(func() { toggleUnderLock(deps, m, func() { deps.ToggleAccel(!m.accel.Checked()) }) })
 	if deps.ToggleSysProxy != nil {
-		m.sys.Click(func() { _ = deps.ToggleSysProxy(!m.sys.Checked()); syncMenu(deps, m) })
+		m.sys.Click(func() { toggleUnderLock(deps, m, func() { _ = deps.ToggleSysProxy(!m.sys.Checked()) }) })
 	}
 	if deps.ToggleAutostart != nil {
-		m.auto.Click(func() { _ = deps.ToggleAutostart(!m.auto.Checked()); syncMenu(deps, m) })
+		m.auto.Click(func() { toggleUnderLock(deps, m, func() { _ = deps.ToggleAutostart(!m.auto.Checked()) }) })
 	}
 	open.Click(deps.OpenUI)
 	quit.Click(deps.Quit)
@@ -141,8 +147,24 @@ func onReady(deps Deps) {
 	}()
 }
 
+// toggleUnderLock 读 Checked → 执行动作 → 刷新菜单，全程持锁：
+// 与 ticker 的 syncMenu 互斥，消除库裸字段上的并发读写（review H5）。
+func toggleUnderLock(deps Deps, m menuSet, action func()) {
+	menuMu.Lock()
+	defer menuMu.Unlock()
+	action()
+	syncMenuLocked(deps, m)
+}
+
 // syncMenu 从回调拉取实际状态刷到菜单（回调失败/外部变更后被下一轮纠正）。
 func syncMenu(deps Deps, m menuSet) {
+	menuMu.Lock()
+	defer menuMu.Unlock()
+	syncMenuLocked(deps, m)
+}
+
+// syncMenuLocked 需持 menuMu 调用（读状态回调并写菜单项字段）。
+func syncMenuLocked(deps Deps, m menuSet) {
 	m.status.SetTitle(statusTitle(deps.AccelState()))
 	if deps.AccelState() {
 		m.accel.Check()

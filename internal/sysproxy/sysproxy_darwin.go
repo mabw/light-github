@@ -50,11 +50,16 @@ func applyAll(services []string, flag, value string) error {
 	if ok == 0 && last != nil {
 		return fmt.Errorf("sysproxy: %d 个网络服务全部失败，最后错误: %w", len(services), last)
 	}
+	invalidateState()
 	return nil
 }
 
-// Enabled 任一启用服务的 PAC 指向 pacURL 且已启用时返回 true。
+// Enabled 任一启用服务的 PAC 指向 pacURL 且已启用时返回 true（TTL 缓存，review H2）。
 func Enabled(pacURL string) bool {
+	return enabledCached(func() bool { return enabledUncached(pacURL) })
+}
+
+func enabledUncached(pacURL string) bool {
 	services, err := activeServices()
 	if err != nil {
 		return false
