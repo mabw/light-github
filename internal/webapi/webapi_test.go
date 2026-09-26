@@ -461,3 +461,36 @@ func TestConfig_SecondPostKeepsFirstChange(t *testing.T) {
 		t.Fatalf("两次更新应同时保留: %+v err=%v", saved, err)
 	}
 }
+
+// 无 token 时 /api/* 仅接受本机 Host（review H7：DNS rebinding 同源偷读
+// 连接历史/改配置；有 token 时以鉴权为准——WSL 经宿主 IP 访问的场景不受影响）
+func TestAPI_RejectsForeignHostWithoutToken(t *testing.T) {
+	deps := newDeps(t, config.Config{})
+	h := Handler(deps)
+
+	do := func(host string) int {
+		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+		req.Host = host
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		return rr.Code
+	}
+	for _, ok := range []string{"127.0.0.1:12800", "localhost:12800", "[::1]:12800"} {
+		if c := do(ok); c != 200 {
+			t.Fatalf("本机 Host %s 应放行: %d", ok, c)
+		}
+	}
+	if c := do("evil.example.com"); c != http.StatusForbidden {
+		t.Fatalf("外部 Host 应 403: %d", c)
+	}
+
+	// 带 token：已有鉴权，外网 Host（WSL 宿主 IP 场景）放行
+	deps.Token = "s3cret"
+	req := httptest.NewRequest(http.MethodGet, "/api/status?token=s3cret", nil)
+	req.Host = "192.168.1.5:12800"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("带 token 的外网 Host 应放行: %d", rr.Code)
+	}
+}

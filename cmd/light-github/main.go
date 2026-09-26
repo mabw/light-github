@@ -247,6 +247,7 @@ func main() {
 		Metrics: store,
 		Token:   cfg.Token,
 		Web:     webapi.Handler(deps),
+		Log:     log,
 	}
 	listenAddr, err := srv.ListenAndServe(ctx)
 	if err != nil {

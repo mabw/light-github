@@ -17,10 +17,10 @@ func Enable(pacURL string) error {
 	return err
 }
 
-// Disable 删除 AutoConfigURL（还原）。
+// Disable 删除 AutoConfigURL（还原）。失败上抛（review H3：吞错会假成功）。
 func Disable() error {
-	_, _ = execRun("reg", "delete", regPath, "/v", "AutoConfigURL", "/f")
-	return nil
+	_, err := execRun("reg", "delete", regPath, "/v", "AutoConfigURL", "/f")
+	return err
 }
 
 // Enabled AutoConfigURL 当前值等于 pacURL 时返回 true。

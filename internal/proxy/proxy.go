@@ -5,8 +5,10 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
@@ -16,6 +18,14 @@ import (
 	"github.com/marvin/light-github/internal/metrics"
 	"github.com/marvin/light-github/internal/rule"
 )
+
+// logger 返回服务日志出口（Log 未注入时退到默认，保证 accept 异常可见——review H6）。
+func (s *Server) logger() *slog.Logger {
+	if s.Log != nil {
+		return s.Log
+	}
+	return slog.Default()
+}
 
 // bufioReader 每连接独立的带缓冲读取器
 func bufioReader(c net.Conn) *bufio.Reader { return bufio.NewReader(c) }
@@ -80,6 +90,7 @@ type Server struct {
 	IdleTimeout time.Duration // 隧道空闲超时（DEBT-2）；零值默认 5min
 	Token       string        // 非空时 CONNECT 必须携带 Proxy-Authorization: Bearer（DEBT-6）
 	Web         http.Handler  // M2-5 端口复用：origin-form 请求（控制台/API）交给它；nil 则一律 400
+	Log         *slog.Logger  // 运行日志（accept 异常等；nil 用 slog.Default）
 
 	passthrough atomic.Bool // true = 加速关闭（白名单也直通）；零值 false = 默认加速开启
 
@@ -129,7 +140,14 @@ func (s *Server) ListenAndServe(context.Context) (net.Addr, error) {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
-				return
+				if errors.Is(err, net.ErrClosed) {
+					return // 正常关闭（Close/退出路径）
+				}
+				// fd 耗尽等瞬时错误：退避重试而非退出——accept goroutine
+				// 静默死亡会让代理与控制台一起无声失效（review H6）
+				s.logger().Error("accept 失败，100ms 后重试", "err", err)
+				time.Sleep(100 * time.Millisecond)
+				continue
 			}
 			go s.handleConn(conn)
 		}

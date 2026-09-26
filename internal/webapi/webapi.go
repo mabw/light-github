@@ -97,11 +97,20 @@ func Handler(d *Deps) http.Handler {
 
 // ---- 鉴权 ----
 
-// auth Token 非空时保护 /api/*（静态页与 PAC 放开：不含敏感数据，
-// 页面 JS 会把 ?token= 透传给 API 请求）。
+// auth 两层防线（review H7）：
+//  1. 无 token 时 /api/* 仅接受本机 Host——防 DNS rebinding 把恶意页"同源"到
+//     127.0.0.1 偷读连接历史/改配置（Firefox/Safari 无 PNA 防护）；
+//     有 token 时以鉴权为准（WSL 经宿主 IP 访问的场景不受 Host 白名单约束）
+//  2. Token 非空时校验凭据（静态页与 PAC 放开：不含敏感数据，
+//     页面 JS 会把 ?token= 透传给 API 请求）
 func (d *Deps) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if d.Token != "" && strings.HasPrefix(r.URL.Path, "/api/") {
+		apiScope := strings.HasPrefix(r.URL.Path, "/api/")
+		if d.Token == "" && apiScope && !isLocalHost(r.Host) {
+			writeJSON(w, http.StatusForbidden, envelope{Success: false, Error: "forbidden host"})
+			return
+		}
+		if d.Token != "" && apiScope {
 			token := r.URL.Query().Get("token")
 			if token == "" {
 				if ah := r.Header.Get("Authorization"); strings.HasPrefix(ah, "Bearer ") {
@@ -115,6 +124,20 @@ func (d *Deps) auth(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isLocalHost 判断请求头 Host 是否本机（允许带端口与 IPv6 方括号形态）。
+func isLocalHost(hostPort string) bool {
+	host := hostPort
+	if h, _, err := net.SplitHostPort(hostPort); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	switch host {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	}
+	return false
 }
 
 // ---- 端点 ----

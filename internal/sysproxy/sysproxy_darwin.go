@@ -6,11 +6,13 @@
 package sysproxy
 
 import (
+	"fmt"
 	"strings"
 )
 
 // Enable 为全部启用的网络服务设置 PAC 自动代理。
-// 单个服务失败容忍（如虚拟网卡/蓝牙），任一成功即整体成功。
+// 单个服务失败容忍（如虚拟网卡/蓝牙），但全部失败必须报错——
+// 否则退出还原假成功，PAC 悬空且无任何告警（review H3）。
 func Enable(pacURL string) error {
 	services, err := activeServices()
 	if err != nil {
@@ -19,24 +21,34 @@ func Enable(pacURL string) error {
 	if len(services) == 0 {
 		return errNoService
 	}
-	for _, s := range services {
-		if _, err := execRun("networksetup", "-setautoproxyurl", s, pacURL); err != nil {
-			continue
-		}
-	}
-	return nil
+	return applyAll(services, "-setautoproxyurl", pacURL)
 }
 
-// Disable 关闭全部启用网络服务的自动代理（还原）。
+// Disable 关闭全部启用网络服务的自动代理（还原）。全部失败必须报错（H3）。
 func Disable() error {
 	services, err := activeServices()
 	if err != nil {
 		return err
 	}
+	if len(services) == 0 {
+		return errNoService
+	}
+	return applyAll(services, "-setautoproxystate", "off")
+}
+
+// applyAll 逐服务执行 networksetup 子命令：任一成功即整体成功，
+// 全部失败返回聚合错误（保留最后错误详情）。
+func applyAll(services []string, flag, value string) error {
+	ok, last := 0, error(nil)
 	for _, s := range services {
-		if _, err := execRun("networksetup", "-setautoproxystate", s, "off"); err != nil {
+		if _, err := execRun("networksetup", flag, s, value); err != nil {
+			last = err
 			continue
 		}
+		ok++
+	}
+	if ok == 0 && last != nil {
+		return fmt.Errorf("sysproxy: %d 个网络服务全部失败，最后错误: %w", len(services), last)
 	}
 	return nil
 }

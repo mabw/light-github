@@ -1,20 +1,22 @@
 package sysproxy
 
 import (
+	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fake 执行器：记录调用并按脚本返回（不真改系统）
 type fakeExec struct {
 	calls   []string
-	respond func(name string, args []string) string
+	respond func(name string, args []string) (string, error)
 }
 
 func (f *fakeExec) run(name string, args ...string) (string, error) {
 	f.calls = append(f.calls, strings.Join(append([]string{name}, args...), " "))
 	if f.respond != nil {
-		return f.respond(name, args), nil
+		return f.respond(name, args)
 	}
 	return "", nil
 }
@@ -45,11 +47,11 @@ func TestParseServices_SkipsHeaderAndDisabled(t *testing.T) {
 // 接入：对每个启用服务执行 setautoproxyurl
 func TestEnable_SetsPACPerService(t *testing.T) {
 	f := withFake(t)
-	f.respond = func(name string, args []string) string {
+	f.respond = func(name string, args []string) (string, error) {
 		if strings.Contains(args[0], "listallnetworkservices") {
-			return svcList
+			return svcList, nil
 		}
-		return ""
+		return "", nil
 	}
 
 	if err := Enable("http://127.0.0.1:12800/pac"); err != nil {
@@ -70,11 +72,11 @@ func TestEnable_SetsPACPerService(t *testing.T) {
 // 还原：对每个启用服务关闭自动代理
 func TestDisable_TurnsOffPerService(t *testing.T) {
 	f := withFake(t)
-	f.respond = func(name string, args []string) string {
+	f.respond = func(name string, args []string) (string, error) {
 		if strings.Contains(args[0], "listallnetworkservices") {
-			return svcList
+			return svcList, nil
 		}
-		return ""
+		return "", nil
 	}
 
 	if err := Disable(); err != nil {
@@ -89,14 +91,14 @@ func TestDisable_TurnsOffPerService(t *testing.T) {
 // 状态查询：任一启用服务的 PAC URL 匹配且 Enabled: Yes 即认为已接入
 func TestEnabled_MatchesURLAndState(t *testing.T) {
 	f := withFake(t)
-	f.respond = func(name string, args []string) string {
+	f.respond = func(name string, args []string) (string, error) {
 		switch {
 		case strings.Contains(args[0], "listallnetworkservices"):
-			return svcList
+			return svcList, nil
 		case strings.Contains(args[0], "-getautoproxyurl"):
-			return "URL: http://127.0.0.1:12800/pac\nEnabled: Yes\n"
+			return "URL: http://127.0.0.1:12800/pac\nEnabled: Yes\n", nil
 		}
-		return ""
+		return "", nil
 	}
 
 	if !Enabled("http://127.0.0.1:12800/pac") {
@@ -110,17 +112,79 @@ func TestEnabled_MatchesURLAndState(t *testing.T) {
 // Enabled: No（曾设置过后关闭）不算接入
 func TestEnabled_IgnoresDisabledState(t *testing.T) {
 	f := withFake(t)
-	f.respond = func(name string, args []string) string {
+	f.respond = func(name string, args []string) (string, error) {
 		switch {
 		case strings.Contains(args[0], "listallnetworkservices"):
-			return svcList
+			return svcList, nil
 		case strings.Contains(args[0], "-getautoproxyurl"):
-			return "URL: http://127.0.0.1:12800/pac\nEnabled: No\n"
+			return "URL: http://127.0.0.1:12800/pac\nEnabled: No\n", nil
 		}
-		return ""
+		return "", nil
 	}
 
 	if Enabled("http://127.0.0.1:12800/pac") {
 		t.Fatal("Enabled: No 不应视为已接入")
+	}
+}
+
+// ---- review H3：全部服务失败必须报错（否则退出还原假成功，PAC 悬空无告警）----
+
+func TestEnable_AllServicesFailedReturnsError(t *testing.T) {
+	f := withFake(t)
+	f.respond = func(name string, args []string) (string, error) {
+		if strings.Contains(args[0], "listallnetworkservices") {
+			return svcList, nil
+		}
+		return "", errors.New("networksetup: busy")
+	}
+	if err := Enable("http://127.0.0.1:12800/pac"); err == nil {
+		t.Fatal("全部服务失败应返回错误")
+	}
+}
+
+func TestDisable_AllServicesFailedReturnsError(t *testing.T) {
+	f := withFake(t)
+	f.respond = func(name string, args []string) (string, error) {
+		if strings.Contains(args[0], "listallnetworkservices") {
+			return svcList, nil
+		}
+		return "", errors.New("networksetup: busy")
+	}
+	if err := Disable(); err == nil {
+		t.Fatal("全部服务失败应返回错误")
+	}
+}
+
+// 部分失败容忍（虚拟网卡/蓝牙异常不影响整体，review 保持原语义）
+func TestEnable_PartialFailureStillOK(t *testing.T) {
+	f := withFake(t)
+	f.respond = func(name string, args []string) (string, error) {
+		if strings.Contains(args[0], "listallnetworkservices") {
+			return svcList, nil
+		}
+		if strings.Contains(strings.Join(args, " "), "Thunderbolt") {
+			return "", errors.New("service error")
+		}
+		return "", nil
+	}
+	if err := Enable("http://127.0.0.1:12800/pac"); err != nil {
+		t.Fatalf("部分失败应容忍: %v", err)
+	}
+}
+
+// ---- review H4：execRun 必须有超时（挂死的 networksetup 会卡死退出清理路径）----
+
+func TestExecRun_TimesOut(t *testing.T) {
+	old := execTimeout
+	execTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { execTimeout = old })
+
+	start := time.Now()
+	_, err := execRun("sleep", "5")
+	if err == nil {
+		t.Fatal("超时应返回错误")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("应按超时截断，实际耗时 %v", elapsed)
 	}
 }
