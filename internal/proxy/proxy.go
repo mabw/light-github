@@ -92,6 +92,17 @@ type Server struct {
 
 	passthrough atomic.Bool // true = 加速关闭（白名单也直通）；零值 false = 默认加速开启
 
+	// M5-9b 波动期降级记忆：域名连续 StrikeThreshold 次加速拨号链全失败后，
+	// SuppressWindow 窗口内跳过候选拨号直接兜底（波动期失败链 15-25s，
+	// 客户端超时预算等不到兜底上场）。零值默认 3 次 / 30s；测试可注入。
+	StrikeThreshold int
+	SuppressWindow  time.Duration
+
+	fbMu      sync.Mutex
+	fbStreak  map[string]int       // 域名连续加速拨号链失败计数
+	fbUntil   map[string]time.Time // 域名降级截止时刻
+	fbLogOnce map[string]bool      // 降级进入的日志去重（窗口内不刷屏）
+
 	mu    sync.RWMutex
 	table *rule.Table
 	ln    net.Listener
@@ -105,6 +116,71 @@ const (
 	fastDialTimeout    = 2500 * time.Millisecond
 	maxDialAttempts    = 4
 )
+
+// ---- M5-9b 降级记忆 ----
+
+func (s *Server) strikeThreshold() int {
+	if s.StrikeThreshold > 0 {
+		return s.StrikeThreshold
+	}
+	return 3
+}
+
+func (s *Server) suppressWindow() time.Duration {
+	if s.SuppressWindow > 0 {
+		return s.SuppressWindow
+	}
+	return 30 * time.Second
+}
+
+// suppressed 域名当前是否处于降级窗口（跳过候选拨号直接兜底）。
+// map 惰性初始化（Server 可能零值构造）。
+func (s *Server) suppressed(domain string) bool {
+	s.fbMu.Lock()
+	defer s.fbMu.Unlock()
+	if s.fbUntil == nil {
+		return false
+	}
+	until, ok := s.fbUntil[domain]
+	return ok && time.Now().Before(until)
+}
+
+// strikeFail 加速拨号链全失败：累计连败，达阈值进入降级窗口。
+func (s *Server) strikeFail(domain string) {
+	s.fbMu.Lock()
+	defer s.fbMu.Unlock()
+	if s.fbStreak == nil {
+		s.fbStreak = map[string]int{}
+	}
+	if s.fbUntil == nil {
+		s.fbUntil = map[string]time.Time{}
+	}
+	s.fbStreak[domain]++
+	if s.fbStreak[domain] >= s.strikeThreshold() {
+		s.fbUntil[domain] = time.Now().Add(s.suppressWindow())
+		s.fbStreak[domain] = 0 // 窗口到期后从零再探，避免一次失败立即再降级
+		if s.fbLogOnce == nil || !s.fbLogOnce[domain] {
+			s.logger().Warn("加速拨号链连续失败，进入降级窗口（跳过候选直接兜底）",
+				"domain", domain, "window", s.suppressWindow().String())
+			if s.fbLogOnce == nil {
+				s.fbLogOnce = map[string]bool{}
+			}
+			s.fbLogOnce[domain] = true
+		}
+	}
+}
+
+// strikeClear 加速拨号成功：清零连败与降级日志去重标记（恢复正常）。
+func (s *Server) strikeClear(domain string) {
+	s.fbMu.Lock()
+	defer s.fbMu.Unlock()
+	if s.fbStreak != nil {
+		delete(s.fbStreak, domain)
+	}
+	if s.fbLogOnce != nil {
+		delete(s.fbLogOnce, domain)
+	}
+}
 
 // SetEnabled 加速开关（托盘/控制台共用）。关闭后白名单失效、全部直通——
 // 端口与观测保持可用，已配置的代理/PAC 不悬空；随时可重新开启。
@@ -214,6 +290,7 @@ func (s *Server) handleConnect(ctx context.Context, cancel context.CancelFunc, c
 		via      string
 		usedIP   net.IP
 		dialErr  error // 最后一次失败原因，进连接日志（排障价值，勿吞）
+		dialDone time.Time
 	)
 	if _, accelerated := s.currentTable().Match(domain); accelerated && !s.passthrough.Load() {
 		via = "accel"
@@ -221,43 +298,51 @@ func (s *Server) handleConnect(ctx context.Context, cancel context.CancelFunc, c
 		if perr != nil {
 			dialErr = perr
 		}
-		var d net.Dialer
-		for i, ip := range ips {
-			if i >= maxDialAttempts {
-				break // 快速失败：深封锁期候选全灭时逐个试完要 35s+，
-				// 不如尽快 502 让客户端自行重试（浏览器重试体验远好于挂等）
-			}
-			if ctx.Err() != nil {
-				break // 客户端已断开，停止尝试后续候选
-			}
-			d.Timeout = s.dialTimeout()
-			if i < fastDialCandidates {
-				if fast := min(s.dialTimeout(), fastDialTimeout); fast > 0 {
-					d.Timeout = fast
+		// M5-9b 降级窗口内跳过候选拨号（波动期失败链 15-25s，客户端等不到
+		// 兜底上场）；Pick 照常调用以驱动候选重测——窗口到期自动恢复尝试
+		if !s.suppressed(domain) {
+			var d net.Dialer
+			for i, ip := range ips {
+				if i >= maxDialAttempts {
+					break // 快速失败：深封锁期候选全灭时逐个试完要 35s+，
+					// 不如尽快 502 让客户端自行重试（浏览器重试体验远好于挂等）
 				}
+				if ctx.Err() != nil {
+					break // 客户端已断开，停止尝试后续候选
+				}
+				d.Timeout = s.dialTimeout()
+				if i < fastDialCandidates {
+					if fast := min(s.dialTimeout(), fastDialTimeout); fast > 0 {
+						d.Timeout = fast
+					}
+				}
+				conn, derr := d.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
+				if derr == nil {
+					upstream, usedIP = conn, ip
+					dialDone = time.Now()
+					s.Dialer.ReportSuccess(domain, ip)
+					break
+				}
+				dialErr = derr
+				s.Dialer.ReportFailure(domain, ip)
 			}
-			conn, derr := d.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
-			if derr == nil {
-				upstream, usedIP = conn, ip
-				s.Dialer.ReportSuccess(domain, ip)
-				break
+			if upstream != nil {
+				s.strikeClear(domain)
+			} else {
+				s.strikeFail(domain)
 			}
-			dialErr = derr
-			s.Dialer.ReportFailure(domain, ip)
 		}
 
-		// M5-8 直连兜底：候选全灭（深封锁期）时退化为系统解析直连原目标。
-		// 2026-09-26 实测封锁为「新建连接高丢包」而非全断——浏览器直连靠
-		// TCP 重传硬扛仍可开页（10s 级），远优于代理快速 502（用户实测
-		// 「关代理反而快」的机制根源）；候选经 dirty+冷却重测复活后，
-		// 后续连接自然回到加速。SNI 干扰期直连同挂（无恶化，仍 502）。
-		// 注：封锁期每请求仍先经历候选快速失败（最坏 ~15s）才兜底——
-		// 若实际体验不佳，下一步可加「近期兜底记忆」直接跳过候选。
+		// M5-8 直连兜底：候选全灭（深封锁期）或降级窗口内时，退化为系统
+		// 解析直连原目标。2026-09-26 实测封锁为「新建连接高丢包」而非全断
+		// ——浏览器直连靠 TCP 重传硬扛仍可开页（10s 级），远优于代理快速
+		// 502（用户实测「关代理反而快」的机制根源）；候选经 dirty+冷却重测
+		// 复活后，后续连接自然回到加速。SNI 干扰期直连同挂（无恶化，仍 502）。
 		if upstream == nil && ctx.Err() == nil {
 			var d net.Dialer
 			d.Timeout = s.dialTimeout()
 			if conn, derr := d.DialContext(ctx, "tcp", host); derr == nil {
-				upstream, via = conn, "fallback"
+				upstream, via, dialDone = conn, "fallback", time.Now()
 				s.logger().Info("候选全灭，直连兜底", "domain", domain)
 			} else {
 				dialErr = derr
@@ -268,6 +353,7 @@ func (s *Server) handleConnect(ctx context.Context, cancel context.CancelFunc, c
 		var d net.Dialer
 		d.Timeout = s.dialTimeout()
 		upstream, dialErr = d.DialContext(ctx, "tcp", host)
+		dialDone = time.Now()
 	}
 
 	if upstream == nil {
@@ -277,19 +363,22 @@ func (s *Server) handleConnect(ctx context.Context, cancel context.CancelFunc, c
 			reason = dialErr.Error()
 		}
 		_ = writeSimpleResponse(client, http.StatusBadGateway, "upstream unreachable")
-		s.record(domain, via, usedIP, start, 0, 0, false, reason)
+		s.record(domain, via, usedIP, time.Since(start), 0, 0, false, reason)
 		return
 	}
 	defer upstream.Close()
 
 	// 隧道：200 → 双向字节搬运（不解密 TLS）
 	if _, err := client.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
-		s.record(domain, via, usedIP, start, 0, 0, false, "write 200: "+err.Error())
+		s.record(domain, via, usedIP, dialDone.Sub(start), 0, 0, false, "write 200: "+err.Error())
 		return
 	}
 
 	up, down := tunnel(ctx, cancel, client, upstream, s.idleTimeout(), s.logger())
-	s.record(domain, via, usedIP, start, up, down, true, "")
+	// M5-9a：dialMs 只记拨号链耗时（成功路径 dialDone 即拨号完成时刻；
+	// 此前在隧道结束后取 time.Since(start)，一条 ok 记录 dialMs=197s，
+	// 混入了隧道存活时间，观测失真）
+	s.record(domain, via, usedIP, dialDone.Sub(start), up, down, true, "")
 }
 
 // countingWriter 记录写入进度的包装（watchdog 据此判断空闲）
@@ -354,13 +443,15 @@ func tunnel(ctx context.Context, cancel context.CancelFunc, a, b net.Conn, idleT
 	return u, d
 }
 
-func (s *Server) record(domain, via string, ip net.IP, start time.Time, up, down int64, ok bool, errMsg string) {
+// record 落连接日志。dialDur（M5-9a）：成功路径为纯拨号链耗时（拨号完成
+// 时刻起算），失败路径为尝试全程——隧道存活时间不计入。
+func (s *Server) record(domain, via string, ip net.IP, dialDur time.Duration, up, down int64, ok bool, errMsg string) {
 	if s.Metrics == nil {
 		return
 	}
 	info := metrics.ConnInfo{
 		Domain: domain, Via: via,
-		DialMS: time.Since(start).Milliseconds(),
+		DialMS: dialDur.Milliseconds(),
 		Up:     up, Down: down, OK: ok, Err: errMsg,
 	}
 	if ip != nil {

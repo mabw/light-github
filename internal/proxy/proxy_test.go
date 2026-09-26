@@ -597,3 +597,138 @@ func TestProxy_FallbackFailureStill502(t *testing.T) {
 		t.Fatal("候选与兜底全失败应表现为 Bad Gateway")
 	}
 }
+
+// M5-9a：dialMs 只应记录拨号链耗时，不得混入隧道存活时间
+// （实测 bug：成功连接记录的是「拨号+隧道全程」，一条 ok 记录 dialMs=197s，
+// 观测数据完全失真）
+func TestProxy_DialMSExcludesTunnelLifetime(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(400 * time.Millisecond) // 隧道存活 400ms+
+		_, _ = w.Write([]byte("slow"))
+	}))
+	t.Cleanup(upstream.Close)
+	_, upPort, _ := net.SplitHostPort(upstream.Listener.Addr().String())
+	dialer := &fakeDialer{ips: []net.IP{net.ParseIP("127.0.0.1")}}
+	// 不用 newStack：其 IdleTimeout=150ms 会把 400ms 慢上游当空闲隧道掐断
+	srv := &Server{
+		Addr:        "127.0.0.1:0",
+		Table:       rule.NewTable([]rule.Rule{{Domain: "accel.test", Kind: rule.KindDynamic}}),
+		Dialer:      dialer,
+		Metrics:     metrics.NewStore(time.Second),
+		DialTimeout: 500 * time.Millisecond,
+		IdleTimeout: 3 * time.Second,
+	}
+	addr, err := srv.ListenAndServe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+
+	resp, err := proxiedClient(t, &url.URL{Scheme: "http", Host: addr.String()}).Get("https://accel.test:" + upPort + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	var conns []metrics.ConnInfo
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if conns = srv.Metrics.Conns(10); len(conns) > 0 {
+			break
+		}
+	}
+	if len(conns) == 0 {
+		t.Fatal("应记录连接日志")
+	}
+	if conns[0].DialMS >= 300 {
+		t.Fatalf("dialMs 应只含拨号耗时（回环毫秒级），实际 %dms（混入了隧道存活时间）", conns[0].DialMS)
+	}
+}
+
+// M5-9b：波动期降级记忆——域名连续 N 次加速拨号链全失败后，窗口期内
+// 跳过候选拨号直接兜底（封锁波动期失败链 15-25s，客户端超时预算等不到
+// 兜底上场）；窗口过期自动恢复候选尝试（候选重测由 Pick 照常驱动）
+func TestProxy_StrikeSuppressesCandidateDialing(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Connection", "close")
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(upstream.Close)
+	upAddr := upstream.Listener.Addr().String()
+
+	srv := &Server{
+		Addr:            "127.0.0.1:0",
+		Table:           rule.NewTable([]rule.Rule{{Domain: "127.0.0.1", Kind: rule.KindFixedIP, Forward: "240.0.0.1"}}),
+		Dialer:          &fakeDialer{ips: []net.IP{net.ParseIP("240.0.0.1")}}, // 必失败候选
+		Metrics:         metrics.NewStore(time.Second),
+		DialTimeout:     200 * time.Millisecond,
+		StrikeThreshold: 2, // 连续 2 次全失败即降级
+		SuppressWindow:  80 * time.Millisecond,
+	}
+	addr, err := srv.ListenAndServe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	client := proxiedClient(t, &url.URL{Scheme: "http", Host: addr.String()})
+	fd := srv.Dialer.(*fakeDialer)
+
+	// 前两次：走候选（失败上报增长）→ 兜底成功
+	for i := 0; i < 2; i++ {
+		resp, err := client.Get("https://" + upAddr + "/")
+		if err != nil {
+			t.Fatalf("第 %d 次兜底应成功: %v", i+1, err)
+		}
+		resp.Body.Close()
+	}
+	if len(fd.failures) != 2 {
+		t.Fatalf("前置条件：应已两次候选失败: %v", fd.failures)
+	}
+
+	// 第 3 次（streak 达阈值）：降级窗口内不拨候选，直接兜底
+	resp, err := client.Get("https://" + upAddr + "/")
+	if err != nil {
+		t.Fatalf("降级窗口内兜底应成功: %v", err)
+	}
+	resp.Body.Close()
+	if len(fd.failures) != 2 {
+		t.Fatalf("降级窗口内不应再拨候选: %v", fd.failures)
+	}
+
+	// 窗口过期：恢复候选拨号（又失败 → 再进降级）
+	time.Sleep(120 * time.Millisecond)
+	resp, err = client.Get("https://" + upAddr + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(fd.failures) != 3 {
+		t.Fatalf("窗口过期应恢复候选尝试: %v", fd.failures)
+	}
+}
+
+// 候选拨号成功清零连败计数（正常期不受降级机制影响）
+func TestProxy_StrikeClearedOnSuccess(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Connection", "close")
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(upstream.Close)
+	_, upPort, _ := net.SplitHostPort(upstream.Listener.Addr().String())
+
+	// 候选 240.0.0.1 必失败 + 127.0.0.1 成功：第二候选命中 → strike 清零
+	dialer := &fakeDialer{ips: []net.IP{net.ParseIP("240.0.0.1"), net.ParseIP("127.0.0.1")}}
+	proxyURL, srv := newStack(t, dialer)
+	srv.StrikeThreshold = 1
+
+	for i := 0; i < 3; i++ {
+		resp, err := proxiedClient(t, proxyURL).Get("https://accel.test:" + upPort + "/")
+		if err != nil {
+			t.Fatalf("第 %d 次应经第二候选成功: %v", i+1, err)
+		}
+		resp.Body.Close()
+	}
+	if len(dialer.failures) != 3 {
+		t.Fatalf("每次首候选失败都应上报且不触发降级（成功清零）: %v", dialer.failures)
+	}
+}
