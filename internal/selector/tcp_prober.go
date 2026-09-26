@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"net"
+	"net/http"
 	"sort"
 	"time"
 )
@@ -61,8 +62,9 @@ func (p *MedianProber) Probe(ctx context.Context, domain string, ip net.IP) time
 		costs = append(costs, cost)
 	}
 
-	// TLS 层验证：失败按超时值惩罚（排序自然沉底）
-	if !p.tlsHandshakeOK(ctx, domain, ip, port, timeout) {
+	// 应用层验证：真实 HEAD 请求（握手 + 证书域身份 + 响应码），失败按
+	// 超时值惩罚（排序自然沉底）
+	if !p.httpOK(ctx, domain, ip, port, timeout) {
 		return timeout
 	}
 
@@ -70,33 +72,51 @@ func (p *MedianProber) Probe(ctx context.Context, domain string, ip net.IP) time
 	return costs[len(costs)/2]
 }
 
-// tlsHandshakeOK 在独立建连上完成一次 TLS 握手（SNI=域名）并严格校验证书
-// （默认链校验 + 域名匹配）。只验握手不验身份曾让借段把 AWS 段的非 GitHub
-// IP（任何 HTTPS 服务器都能完成握手）当候选放行，客户端端到端校验才揭穿
-// （git 报 SSL certificate problem，实测 2026-09-26）。
-func (p *MedianProber) tlsHandshakeOK(ctx context.Context, domain string, ip net.IP, port string, timeout time.Duration) bool {
-	d := net.Dialer{Timeout: timeout}
-	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
+// httpOK 经指定 IP 发一次真实 HEAD https://domain/ 请求：完整走 TLS 握手
+// （SNI=域名）+ 证书域身份校验 + 应用层响应码，任一环失败即 false。
+// 仅 TLS 层验证不够——实测同段 IP 证书全部匹配但应用层混杂 200/400
+// （GitHub 边缘按 IP 分工路由，400 即 "Whoa there!" 页，浏览器故障来源）。
+// 响应码判定：<500 且非 400——400 是跨域路由拒绝；404/405 是服务该域
+// 仅无此资源（资产类域 GET / 常 404）。CA 链校验留给端到端客户端完成
+// ——测速是初筛而非安全边界。
+func (p *MedianProber) httpOK(ctx context.Context, domain string, ip net.IP, port string, timeout time.Duration) bool {
+	addr := net.JoinHostPort(ip.String(), port)
+	tr := &http.Transport{
+		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			raw, err := d.DialContext(ctx, "tcp", addr)
+			if err != nil {
+				return nil, err
+			}
+			tc := tls.Client(raw, &tls.Config{
+				ServerName:         domain,
+				InsecureSkipVerify: true, //nolint:gosec // 链校验由端到端客户端完成；此处验证书域名身份
+				VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+					if len(rawCerts) == 0 {
+						return errors.New("无证书")
+					}
+					c, err := x509.ParseCertificate(rawCerts[0])
+					if err != nil {
+						return err
+					}
+					return c.VerifyHostname(domain)
+				},
+			})
+			if err := tc.HandshakeContext(ctx); err != nil {
+				_ = raw.Close()
+				return nil, err
+			}
+			return tc, nil
+		},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, "https://"+domain+"/", nil)
 	if err != nil {
 		return false
 	}
-	defer conn.Close()
-
-	tc := tls.Client(conn, &tls.Config{
-		ServerName:         domain,
-		InsecureSkipVerify: true, //nolint:gosec // 链校验由端到端客户端完成；此处验证书域名身份
-		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			if len(rawCerts) == 0 {
-				return errors.New("无证书")
-			}
-			c, err := x509.ParseCertificate(rawCerts[0])
-			if err != nil {
-				return err
-			}
-			return c.VerifyHostname(domain)
-		},
-	})
-	hsCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	return tc.HandshakeContext(hsCtx) == nil
+	resp, err := (&http.Client{Transport: tr, Timeout: timeout}).Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode < 500 && resp.StatusCode != http.StatusBadRequest
 }

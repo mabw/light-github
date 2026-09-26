@@ -3,6 +3,7 @@ package selector
 import (
 	"context"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -73,5 +74,36 @@ func TestMedianProber_CertDomainMismatchRejected(t *testing.T) {
 	cost := p.Probe(context.Background(), "github.com", net.ParseIP(host)) // SNI/校验域=github.com
 	if cost != 300*time.Millisecond {
 		t.Fatalf("证书域不匹配的候选应按超时值惩罚: %v", cost)
+	}
+}
+
+// 应用层验证：服务回 400（"Whoa there!" 跨域路由拒绝）的 IP 必须淘汰——
+// 实测同段 IP 证书全匹配但应用层混杂 200/400，浏览器连到 400 类即故障页
+func TestMedianProber_App400Rejected(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(400)
+	}))
+	t.Cleanup(srv.Close)
+	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+
+	p := &MedianProber{Count: 1, Timeout: 300 * time.Millisecond, Port: port}
+	cost := p.Probe(context.Background(), "example.com", net.ParseIP(host))
+	if cost != 300*time.Millisecond {
+		t.Fatalf("应用层 400 的候选应按超时值惩罚: %v", cost)
+	}
+}
+
+// 应用层 404（服务该域仅无此资源，资产类域 GET / 常见）不算死
+func TestMedianProber_App404StillAlive(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+	}))
+	t.Cleanup(srv.Close)
+	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+
+	p := &MedianProber{Count: 1, Timeout: 300 * time.Millisecond, Port: port}
+	cost := p.Probe(context.Background(), "example.com", net.ParseIP(host))
+	if cost >= 300*time.Millisecond {
+		t.Fatalf("404 是服务中（无此资源），不应惩罚: %v", cost)
 	}
 }
