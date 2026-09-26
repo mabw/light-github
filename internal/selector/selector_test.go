@@ -392,3 +392,72 @@ func TestPick_AllFixedIPsFromDuplicateRules(t *testing.T) {
 		t.Fatalf("候选应含两条固定 IP 与 DoH 补充: %v", ips)
 	}
 }
+
+// M5-6 借段兜底：数据源对某域只给单一官方段（github.com 实测只给 20.x），
+// 段级封锁时主候选全灭。主候选稀缺（≤2）时从表内其他 FixedIP 借段补充，
+// TLS 测速淘汰死段——端到端握手保证连错 IP 也不出安全问题。
+func TestPick_BorrowSiblingsWhenPrimaryScarce(t *testing.T) {
+	res := &fakeResolver{ips: []net.IP{ip("20.205.1.1")}} // DoH 也是同一死段
+	tbl := rule.NewTable([]rule.Rule{
+		{Domain: "github.com", Kind: rule.KindFixedIP, Forward: "20.207.1.1"},
+		{Domain: "collector.github.com", Kind: rule.KindFixedIP, Forward: "140.82.1.1"},
+		{Domain: "avatars.githubusercontent.com", Kind: rule.KindFixedIP, Forward: "185.199.1.1"},
+	})
+	s := New(tbl, res, &fakeProber{}, 10*time.Second, 5*time.Minute)
+
+	ips, err := s.Pick(context.Background(), "github.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	has := func(want string) bool {
+		for _, x := range ips {
+			if x.String() == want {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("20.207.1.1") || !has("20.205.1.1") {
+		t.Fatalf("主候选应保留: %v", ips)
+	}
+	if !has("140.82.1.1") || !has("185.199.1.1") {
+		t.Fatalf("主候选稀缺时应借段补充兄弟 FixedIP: %v", ips)
+	}
+
+	// 主候选充足（≥3）的域不借段——避免无谓扩大候选
+	res2 := &fakeResolver{ips: []net.IP{ip("1.1.1.1"), ip("2.2.2.2")}}
+	tbl2 := rule.NewTable([]rule.Rule{
+		{Domain: "a.com", Kind: rule.KindFixedIP, Forward: "3.3.3.3"},
+		{Domain: "b.com", Kind: rule.KindFixedIP, Forward: "9.9.9.9"},
+	})
+	s2 := New(tbl2, res2, &fakeProber{}, 10*time.Second, 5*time.Minute)
+	ips2, _ := s2.Pick(context.Background(), "a.com")
+	for _, x := range ips2 {
+		if x.String() == "9.9.9.9" {
+			t.Fatalf("主候选充足（3 个）不应借段: %v", ips2)
+		}
+	}
+}
+
+// DoH 补充与 FixedIP 同 IP（真实场景：github.com 的 DoH 与 GitHub520
+// 同给 20.205.243.166）时，借段判定按去重后计数——重复不得虚高
+func TestPick_DuplicateSupplementDoesNotBlockBorrow(t *testing.T) {
+	res := &fakeResolver{ips: []net.IP{ip("20.205.1.1")}} // 与第二条 FixedIP 重复
+	tbl := rule.NewTable([]rule.Rule{
+		{Domain: "github.com", Kind: rule.KindFixedIP, Forward: "20.207.1.1"},
+		{Domain: "github.com", Kind: rule.KindFixedIP, Forward: "20.205.1.1"},
+		{Domain: "collector.github.com", Kind: rule.KindFixedIP, Forward: "140.82.1.1"},
+	})
+	s := New(tbl, res, &fakeProber{}, 10*time.Second, 5*time.Minute)
+
+	ips, err := s.Pick(context.Background(), "github.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range ips {
+		if x.String() == "140.82.1.1" {
+			return // 借到了
+		}
+	}
+	t.Fatalf("重复补充不应阻断借段: %v", ips)
+}

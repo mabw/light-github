@@ -57,11 +57,12 @@ func Normalize(domain, forward, fakeSNI string) Rule {
 type Table struct {
 	exact map[string][]Rule
 	wild  map[string][]Rule
+	all   []Rule // 原始规则序（AllFixedIPs 借段兜底用，M5-6）
 }
 
 // NewTable 构建规则表。重复域名以靠后的规则覆盖靠前的。
 func NewTable(rules []Rule) *Table {
-	t := &Table{exact: map[string][]Rule{}, wild: map[string][]Rule{}}
+	t := &Table{exact: map[string][]Rule{}, wild: map[string][]Rule{}, all: rules}
 	for _, r := range rules {
 		d := normalizeDomain(r.Domain)
 		r.Domain = d
@@ -129,4 +130,16 @@ func (t *Table) MatchAll(domain string) []Rule {
 		}
 	}
 	return nil
+}
+
+// AllFixedIPs 返回表内全部 FixedIP 的 Forward（原始规则序，含重复）。
+// 借段兜底的数据源（M5-6）：GitHub520 的测速优选 IP 分布在各域名规则里。
+func (t *Table) AllFixedIPs() []string {
+	var out []string
+	for _, r := range t.all {
+		if r.Kind == KindFixedIP {
+			out = append(out, r.Forward)
+		}
+	}
+	return out
 }

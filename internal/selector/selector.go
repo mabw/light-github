@@ -27,6 +27,16 @@ import (
 // sinkThreshold 连续失败达到此次数的候选沉底
 const sinkThreshold = 2
 
+// 借段兜底（M5-6）：主候选 ≤ borrowThreshold 个时，从表内其他 FixedIP
+// 借最多 maxBorrowed 个补充。实测场景：数据源对 github.com 只给单一官方段
+// （steampp/GitHub520/国内 DoH 全给 20.x），段级封锁时主候选全灭，而
+// GitHub520 给其他 GitHub 域的 140.82 段完好——GitHub 前端段服务全域，
+// TLS 端到端握手保证连错 IP 也不出安全问题（测速即淘汰）。
+const (
+	borrowThreshold = 2
+	maxBorrowed     = 6
+)
+
 // Resolver 域名 → IP 候选来源（DoH / CNAME 通道共用）。
 type Resolver interface {
 	Resolve(ctx context.Context, domain string) ([]net.IP, error)
@@ -277,30 +287,70 @@ func (s *Selector) candidateIPs(ctx context.Context, domain string) ([]net.IP, e
 
 	// 全部同名 FixedIP 依源优先级入候选（M5-4：多源并集），
 	// 后接 DoH 解析补充
+	var primary []net.IP
 	if len(matched) > 0 && matched[0].Kind == rule.KindFixedIP {
-		var fixed []net.IP
 		for _, r := range matched {
 			if ip := net.ParseIP(r.Forward); ip != nil {
-				fixed = append(fixed, ip)
+				primary = append(primary, ip)
 			}
 		}
-		if len(fixed) > 0 {
+		if len(primary) > 0 {
 			supplement, _ := s.resolver.Resolve(ctx, domain)
-			return append(fixed, supplement...), nil
+			primary = append(primary, supplement...)
 		}
 	}
-	query := domain
-	if len(matched) > 0 && matched[0].Kind == rule.KindCNAME {
-		query = matched[0].Forward
+	if primary == nil { // 非 FixedIP：CNAME 通道或 Dynamic 均解析得候选
+		query := domain
+		if len(matched) > 0 && matched[0].Kind == rule.KindCNAME {
+			query = matched[0].Forward
+		}
+		ips, err := s.resolver.Resolve(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("selector: resolve %s: %w", query, err)
+		}
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("selector: no usable candidates for %s (via %s)", domain, query)
+		}
+		primary = ips
 	}
-	ips, err := s.resolver.Resolve(ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("selector: resolve %s: %w", query, err)
+
+	// 去重（DoH 补充常与数据源 FixedIP 同 IP——含重复计数会让借段判定虚高，
+	// 实测：github.com 的 DoH 与 GitHub520 同给 20.205.243.166，len=3 误判充足）
+	seen := make(map[string]bool, len(primary))
+	deduped := make([]net.IP, 0, len(primary))
+	for _, ip := range primary {
+		if !seen[ip.String()] {
+			seen[ip.String()] = true
+			deduped = append(deduped, ip)
+		}
 	}
-	if len(ips) == 0 {
-		return nil, fmt.Errorf("selector: no usable candidates for %s (via %s)", domain, query)
+
+	// 借段兜底：主候选稀缺（去重后）时补充表内其他 FixedIP
+	if len(deduped) <= borrowThreshold {
+		deduped = append(deduped, s.borrowedIPs(deduped)...)
 	}
-	return ips, nil
+	return deduped, nil
+}
+
+// borrowedIPs 表内其他 FixedIP 样本（原始规则序，去重已有，最多 maxBorrowed 个）。
+func (s *Selector) borrowedIPs(have []net.IP) []net.IP {
+	seen := make(map[string]bool, len(have))
+	for _, ip := range have {
+		seen[ip.String()] = true
+	}
+	var out []net.IP
+	for _, fwd := range s.currentTable().AllFixedIPs() {
+		ip := net.ParseIP(fwd)
+		if ip == nil || seen[ip.String()] {
+			continue
+		}
+		seen[ip.String()] = true
+		out = append(out, ip)
+		if len(out) >= maxBorrowed {
+			break
+		}
+	}
+	return out
 }
 
 func sinkRank(c candidate) int {
