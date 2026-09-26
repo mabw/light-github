@@ -72,7 +72,7 @@ git / 浏览器 / curl（CONNECT 127.0.0.1:12800）
 go test -race -cover ./...   # 全部包测试（当前覆盖率 85%+）
 ```
 
-里程碑：M0 spike ✅ → M1 核心 CLI ✅ → M2 Web 管理 UI ✅ → **M3 托盘/自启 ✅（macOS 实测，Windows/Linux 见 DEBT-8）** → M4 三平台打包分发
+里程碑：M0 spike ✅ → M1 核心 CLI ✅ → M2 Web 管理 UI ✅ → M3 托盘/自启 ✅（macOS 实测，Windows/Linux 见 DEBT-8）→ **M4 打包分发 ✅（[v0.4.0](https://github.com/mabw/light-github/releases) 起 GitHub Actions 自动发布四平台产物）**
 
 ## 致谢（Acknowledgments）
 

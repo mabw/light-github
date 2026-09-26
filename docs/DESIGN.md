@@ -197,7 +197,7 @@ type Rule struct {
 | **M1 核心 CLI** ✅ 2026-09-25 完成 | proxy + selector + source + metrics，headless 运行 | `git clone` 经代理 1.49s（直连 16.8s）；`-race` 全绿 |
 | **M2 Web UI** ✅ 2026-09-25 完成 | 控制台（单文件页 + 7 端点）+ 双通道日志 + 配置持久化 | 见 §6.1；11 包 `-race` 全绿 |
 | **M3 平台层** ✅ 2026-09-26（macOS） | 托盘（octocat 图标/状态总闸/三开关菜单）+ 三平台自启 + `-no-tray` headless | macOS 全项实测（加速开关/PAC 接入还原/自启 plist/SIGTERM 与托盘退出清理闭环）；Windows/Linux 真机验证 → DEBT-8（M4） |
-| **M4 发布** | goreleaser + 安装文档 | 三平台产物 + 一键接入文档 |
+| **M4 发布** ✅ 2026-09-26（v0.4.0） | goreleaser 四目标 + GitHub Actions（CI 双平台矩阵 + tag 发布）+ 安装文档 | [v0.4.0](https://github.com/mabw/light-github/releases/tag/v0.4.0) 四产物 + checksums；darwin amd64 用 `clang -arch` 交叉（Intel runner 已退役）；Windows/Linux 真机验证 → DEBT-7/8 |
 
 ### 6.1 M2 架构要点（2026-09-25 定稿实现）
 

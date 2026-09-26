@@ -62,6 +62,7 @@
 | DEBT-3 冷启动慢 | fix: DEBT-3/4 selector 分片锁+Preload 后台预热 | TestSelector_PreloadFillsCache + cmd 启动预热接入 |
 | DEBT-4 全局锁 | 同上 | TestPick_DifferentDomainsDoNotBlockEachOther（真阻塞探针：fast 31ms vs slow 300ms），selector 93.7% |
 | DEBT-6 0.0.0.0 无鉴权 | fix: DEBT-6 cmd 强制校验 + proxy 407 | TestValidateListen 6 用例 + TestProxy_TokenAuth + 实测拒绝启动 |
+| DEBT-9 托盘 UI 死锁 | fix: DEBT-9 托盘死锁根治——菜单操作单线程化（50c2525，含于 v0.4.0） | 根因实锤（systray darwin `waitUntilDone:YES` + ticker 持锁互等）；修复后 macOS 真机点「系统代理」恢复正常；snapshotStates 两用例 |
 
 ---
 
@@ -72,8 +73,6 @@
 - 与 `docs/DESIGN.md` §7 风险表区分：那边是"外部风险与对策"，这边是"代码内部欠账"
 
 ## 待清偿
-
-### DEBT-9 🔴 托盘 UI 死锁：点击「系统代理」后菜单永久无响应（macOS 实发，2026-09-26）
 
 - **位置**：`internal/tray/tray.go`（syncMenu ticker / toggleUnderLock）与 energye/systray darwin 原生层交互
 - **复现**（用户真机，v0.3.0 部署版）：09:31:01-02 连续开关「加速」正常（有日志），随后点击「系统代理」——**无任何日志**（setSysProxy 未被调用，连失败路径的 Warn 都没有），此后图标点击永久无响应。
