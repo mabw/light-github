@@ -27,7 +27,7 @@ type DomainInfo struct {
 func (s *Selector) Reprobe(ctx context.Context, domain string) ([]net.IP, error) {
 	st := s.stateFor(domain)
 	st.mu.Lock()
-	st.probedAt = time.Time{} // 使 Pick 视为过期重建
+	st.dirty = true // 使 Pick 视为过期重建（不清 probedAt，保持 Inspect 可见）
 	st.mu.Unlock()
 	return s.Pick(ctx, domain)
 }

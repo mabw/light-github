@@ -15,7 +15,7 @@ func TestInspect_ExposesCandidatesAndSinkState(t *testing.T) {
 		rule.NewTable([]rule.Rule{{Domain: "github.com", Kind: rule.KindFixedIP, Forward: "1.1.1.1"}}),
 		&fakeResolver{ips: []net.IP{ip("2.2.2.2")}},
 		&fakeProber{costs: map[string]time.Duration{"1.1.1.1": 50 * time.Millisecond}},
-		5*time.Minute,
+		10*time.Second, 5*time.Minute,
 	)
 
 	if _, err := sel.Pick(context.Background(), "github.com"); err != nil {
@@ -58,7 +58,7 @@ func TestInspect_SkipsUnprobedAndSorts(t *testing.T) {
 		}),
 		&fakeResolver{ips: []net.IP{ip("3.3.3.3")}},
 		&fakeProber{},
-		5*time.Minute,
+		10*time.Second, 5*time.Minute,
 	)
 
 	if _, err := sel.Pick(context.Background(), "b.com"); err != nil {
@@ -83,7 +83,7 @@ func TestInspect_SkipsUnprobedAndSorts(t *testing.T) {
 func TestSetTable_HotSwapsStrategy(t *testing.T) {
 	res := &fakeResolver{ips: []net.IP{ip("9.9.9.9")}}
 	fixedTable := rule.NewTable([]rule.Rule{{Domain: "github.com", Kind: rule.KindFixedIP, Forward: "1.1.1.1"}})
-	sel := New(fixedTable, res, &fakeProber{}, 5*time.Minute)
+	sel := New(fixedTable, res, &fakeProber{}, 10*time.Second, 5*time.Minute)
 
 	ips, err := sel.Pick(context.Background(), "github.com")
 	if err != nil {
@@ -110,7 +110,7 @@ func TestReprobe_ForcesRetestIgnoringCache(t *testing.T) {
 	sel := New(
 		rule.NewTable([]rule.Rule{{Domain: "github.com", Kind: rule.KindFixedIP, Forward: "1.1.1.1"}}),
 		&fakeResolver{ips: []net.IP{ip("9.9.9.9")}},
-		prober, 5*time.Minute,
+		prober, 10*time.Second, 5*time.Minute,
 	)
 
 	if _, err := sel.Pick(context.Background(), "github.com"); err != nil {
@@ -155,7 +155,7 @@ func TestInspect_DomainCandidatesStayAligned(t *testing.T) {
 		rules = append(rules, rule.Rule{Domain: d, Kind: rule.KindFixedIP, Forward: ipStr})
 		res.m[d] = []net.IP{net.ParseIP(ipStr)}
 	}
-	s := New(rule.NewTable(rules), res, &fakeProber{}, 5*time.Minute)
+	s := New(rule.NewTable(rules), res, &fakeProber{}, 10*time.Second, 5*time.Minute)
 
 	for d := range fixed {
 		if _, err := s.Pick(context.Background(), d); err != nil {

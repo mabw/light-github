@@ -31,9 +31,9 @@ type Resolver interface {
 	Resolve(ctx context.Context, domain string) ([]net.IP, error)
 }
 
-// Prober 单 IP 出口质量探测（TCP 建连中位耗时；失败返回惩罚值）。
+// Prober 单 IP 出口质量探测（TCP 建连中位耗时 + TLS 握手验证；失败返回惩罚值）。
 type Prober interface {
-	Probe(ctx context.Context, ip net.IP) time.Duration
+	Probe(ctx context.Context, domain string, ip net.IP) time.Duration
 }
 
 type candidate struct {
@@ -43,17 +43,34 @@ type candidate struct {
 }
 
 type domainState struct {
-	mu         sync.Mutex // DEBT-4：域名级分片锁（测速期间仅阻塞同域名）
-	probedAt   time.Time
-	candidates []candidate
+	mu          sync.Mutex // DEBT-4：域名级分片锁（测速期间仅阻塞同域名）
+	probedAt    time.Time
+	dirty       bool // 需重建（失败上报/规则换表置位）；不清 probedAt——Inspect 在重建前仍可展示旧数据
+	generations int  // 已重建次数：首个缓存用 firstTTL（短），第二个起用 steadyTTL（Watt 10s/100s 语义）
+	candidates  []candidate
+}
+
+// expired 选路结果是否过期（M5 §2.5 生命周期回收）：dirty 立即过期；
+// 否则首轮 firstTTL、之后 steadyTTL——任何「已建连但变坏」的候选
+// 上界 steadyTTL 后自然淘汰。
+func (st *domainState) expired(now time.Time, firstTTL, steadyTTL time.Duration) bool {
+	if st.dirty || st.probedAt.IsZero() {
+		return true
+	}
+	ttl := firstTTL
+	if st.generations >= 2 {
+		ttl = steadyTTL
+	}
+	return now.Sub(st.probedAt) >= ttl
 }
 
 // Selector 出站选择器。并发安全。
 type Selector struct {
-	tbl      *rule.Table
-	resolver Resolver
-	prober   Prober
-	ttl      time.Duration
+	tbl       *rule.Table
+	resolver  Resolver
+	prober    Prober
+	firstTTL  time.Duration
+	steadyTTL time.Duration
 
 	tblMu sync.RWMutex // 规则表热更新（数据源刷新时 SetTable 换入）
 
@@ -61,14 +78,17 @@ type Selector struct {
 	states map[string]*domainState
 }
 
-// New 构造选择器；cacheTTL 为测速结果缓存有效期（设计值 5min）。
-func New(tbl *rule.Table, resolver Resolver, prober Prober, cacheTTL time.Duration) *Selector {
+// New 构造选择器。firstTTL 为首轮选路有效期（设计值 10s——启动/预热时
+// 网络异常的快速自我纠正），steadyTTL 为稳态周期（设计值 100s——
+// 坏候选的淘汰上界，替代「失败摘除状态机」，调研 §3 采纳 #2）。
+func New(tbl *rule.Table, resolver Resolver, prober Prober, firstTTL, steadyTTL time.Duration) *Selector {
 	return &Selector{
-		tbl:      tbl,
-		resolver: resolver,
-		prober:   prober,
-		ttl:      cacheTTL,
-		states:   map[string]*domainState{},
+		tbl:       tbl,
+		resolver:  resolver,
+		prober:    prober,
+		firstTTL:  firstTTL,
+		steadyTTL: steadyTTL,
+		states:    map[string]*domainState{},
 	}
 }
 
@@ -92,7 +112,7 @@ func (s *Selector) SetTable(t *rule.Table) {
 
 	for _, st := range states {
 		st.mu.Lock()
-		st.probedAt = time.Time{}
+		st.dirty = true
 		st.mu.Unlock()
 	}
 }
@@ -123,12 +143,13 @@ func (s *Selector) Pick(ctx context.Context, domain string) ([]net.IP, error) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 
-	if st.probedAt.IsZero() || time.Since(st.probedAt) >= s.ttl {
+	if st.expired(time.Now(), s.firstTTL, s.steadyTTL) {
 		cands, err := s.buildCandidates(ctx, domain, st)
 		if err != nil && len(cands) == 0 {
 			return nil, err
 		}
-		st.candidates, st.probedAt = cands, time.Now()
+		st.candidates, st.probedAt, st.dirty = cands, time.Now(), false
+		st.generations++
 	}
 
 	ordered := make([]candidate, len(st.candidates))
@@ -172,7 +193,9 @@ func (s *Selector) Preload(ctx context.Context, domains []string, concurrency in
 	wg.Wait()
 }
 
-// ReportFailure 上报某 IP 连接失败（连续失败达阈值后沉底）。
+// ReportFailure 上报某 IP 连接失败：连续失败达阈值后沉底；
+// 并立即失效该域名的选路缓存（M5：下次 Pick 重建重测——封锁期
+// 死 IP 不再等到 TTL 自然过期才出局，两次断网实测的 150s 拨号主因）。
 func (s *Selector) ReportFailure(domain string, ip net.IP) {
 	st := s.stateFor(domain)
 	st.mu.Lock()
@@ -180,6 +203,7 @@ func (s *Selector) ReportFailure(domain string, ip net.IP) {
 	if c := findCandidate(st.candidates, ip); c != nil {
 		c.failure++
 	}
+	st.dirty = true // 下次 Pick 重建重测；不清 probedAt（Inspect 重建前仍展示旧候选）
 }
 
 // ReportSuccess 上报连接成功（重置失败计数）。
@@ -230,7 +254,7 @@ func (s *Selector) buildCandidates(ctx context.Context, domain string, st *domai
 		wg.Add(1)
 		go func(i int, ip net.IP) {
 			defer wg.Done()
-			cands[i] = candidate{ip: ip, cost: s.prober.Probe(ctx, ip)}
+			cands[i] = candidate{ip: ip, cost: s.prober.Probe(ctx, domain, ip)}
 		}(i, ip)
 	}
 	wg.Wait()
