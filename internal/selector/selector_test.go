@@ -30,7 +30,7 @@ type fakeProber struct {
 	calls atomic.Int64             // 并发测速下原子计数（buildCandidates 每 IP 一个 goroutine）
 }
 
-func (f *fakeProber) Probe(_ context.Context, ip net.IP) time.Duration {
+func (f *fakeProber) Probe(_ context.Context, _ string, ip net.IP) time.Duration {
 	f.calls.Add(1)
 	if d, ok := f.costs[ip.String()]; ok {
 		return d
@@ -45,7 +45,7 @@ func ip(s string) net.IP { return net.ParseIP(s) }
 func TestPick_FixedIPRulePutsFixedFirstWithDoHBackup(t *testing.T) {
 	res := &fakeResolver{ips: []net.IP{ip("1.1.1.1"), ip("2.2.2.2")}}
 	tbl := rule.NewTable([]rule.Rule{{Domain: "github.com", Kind: rule.KindFixedIP, Forward: "20.207.73.82"}})
-	s := New(tbl, res, &fakeProber{}, 5*time.Minute)
+	s := New(tbl, res, &fakeProber{}, 10*time.Second, 5*time.Minute)
 
 	ips, err := s.Pick(context.Background(), "github.com")
 	if err != nil {
@@ -60,7 +60,7 @@ func TestPick_FixedIPRulePutsFixedFirstWithDoHBackup(t *testing.T) {
 func TestPick_CNAMERuleResolvesForwardDomain(t *testing.T) {
 	res := &fakeResolver{ips: []net.IP{ip("20.205.243.168")}}
 	tbl := rule.NewTable([]rule.Rule{{Domain: "api.github.com", Kind: rule.KindCNAME, Forward: "githubapi.rmbgame.net"}})
-	s := New(tbl, res, &fakeProber{}, 5*time.Minute)
+	s := New(tbl, res, &fakeProber{}, 10*time.Second, 5*time.Minute)
 
 	if _, err := s.Pick(context.Background(), "api.github.com"); err != nil {
 		t.Fatalf("err: %v", err)
@@ -73,7 +73,7 @@ func TestPick_CNAMERuleResolvesForwardDomain(t *testing.T) {
 func TestPick_DynamicRuleResolvesSelf(t *testing.T) {
 	res := &fakeResolver{ips: []net.IP{ip("1.2.3.4")}}
 	tbl := rule.NewTable([]rule.Rule{{Domain: "resources.github.com", Kind: rule.KindDynamic}})
-	s := New(tbl, res, &fakeProber{}, 5*time.Minute)
+	s := New(tbl, res, &fakeProber{}, 10*time.Second, 5*time.Minute)
 
 	if _, err := s.Pick(context.Background(), "resources.github.com"); err != nil {
 		t.Fatalf("err: %v", err)
@@ -86,7 +86,7 @@ func TestPick_DynamicRuleResolvesSelf(t *testing.T) {
 func TestPick_UnmatchedDomainResolvesSelf(t *testing.T) {
 	res := &fakeResolver{ips: []net.IP{ip("1.2.3.4")}}
 	tbl := rule.NewTable([]rule.Rule{{Domain: "github.com", Kind: rule.KindDynamic}})
-	s := New(tbl, res, &fakeProber{}, 5*time.Minute)
+	s := New(tbl, res, &fakeProber{}, 10*time.Second, 5*time.Minute)
 
 	// 白名单外域名若被调用（兜底路径），解析自身即可
 	if _, err := s.Pick(context.Background(), "example.com"); err != nil {
@@ -107,7 +107,7 @@ func TestPick_SortsByProbeCost(t *testing.T) {
 		"8.8.8.8": 120 * time.Millisecond,
 	}}
 	tbl := rule.NewTable([]rule.Rule{{Domain: "x.com", Kind: rule.KindDynamic}})
-	s := New(tbl, res, prober, 5*time.Minute)
+	s := New(tbl, res, prober, 10*time.Second, 5*time.Minute)
 
 	ips, _ := s.Pick(context.Background(), "x.com")
 	if !(ips[0].Equal(ip("1.1.1.1")) && ips[1].Equal(ip("8.8.8.8")) && ips[2].Equal(ip("9.9.9.9"))) {
@@ -119,7 +119,7 @@ func TestPick_CachesProbeWithinTTL(t *testing.T) {
 	res := &fakeResolver{ips: []net.IP{ip("1.1.1.1")}}
 	prober := &fakeProber{}
 	tbl := rule.NewTable([]rule.Rule{{Domain: "x.com", Kind: rule.KindDynamic}})
-	s := New(tbl, res, prober, 5*time.Minute)
+	s := New(tbl, res, prober, 10*time.Second, 5*time.Minute)
 
 	if _, err := s.Pick(context.Background(), "x.com"); err != nil {
 		t.Fatal(err)
@@ -138,7 +138,7 @@ func TestPick_CachesProbeWithinTTL(t *testing.T) {
 func TestPick_RepeatedFailureSinksIP(t *testing.T) {
 	res := &fakeResolver{ips: []net.IP{ip("1.1.1.1"), ip("2.2.2.2")}}
 	tbl := rule.NewTable([]rule.Rule{{Domain: "x.com", Kind: rule.KindDynamic}})
-	s := New(tbl, res, &fakeProber{}, 5*time.Minute)
+	s := New(tbl, res, &fakeProber{}, 10*time.Second, 5*time.Minute)
 
 	ips, _ := s.Pick(context.Background(), "x.com")
 	if !ips[0].Equal(ip("1.1.1.1")) {
@@ -157,7 +157,7 @@ func TestPick_RepeatedFailureSinksIP(t *testing.T) {
 func TestPick_SuccessResetsFailureCount(t *testing.T) {
 	res := &fakeResolver{ips: []net.IP{ip("1.1.1.1"), ip("2.2.2.2")}}
 	tbl := rule.NewTable([]rule.Rule{{Domain: "x.com", Kind: rule.KindDynamic}})
-	s := New(tbl, res, &fakeProber{}, 5*time.Minute)
+	s := New(tbl, res, &fakeProber{}, 10*time.Second, 5*time.Minute)
 
 	s.Pick(context.Background(), "x.com")
 	s.ReportFailure("x.com", ip("1.1.1.1"))
@@ -174,7 +174,7 @@ func TestPick_AllProbeTimeoutStillReturnsCandidates(t *testing.T) {
 	res := &fakeResolver{ips: []net.IP{ip("1.1.1.1")}}
 	prober := &fakeProber{costs: map[string]time.Duration{"1.1.1.1": time.Second}}
 	tbl := rule.NewTable([]rule.Rule{{Domain: "x.com", Kind: rule.KindDynamic}})
-	s := New(tbl, res, prober, 5*time.Minute)
+	s := New(tbl, res, prober, 10*time.Second, 5*time.Minute)
 
 	// 测速全超时不视为致命：仍返回候选交由拨号方实际尝试
 	ips, err := s.Pick(context.Background(), "x.com")
@@ -186,7 +186,7 @@ func TestPick_AllProbeTimeoutStillReturnsCandidates(t *testing.T) {
 func TestPick_NoCandidatesReturnsError(t *testing.T) {
 	res := &fakeResolver{ips: nil, err: context.DeadlineExceeded}
 	tbl := rule.NewTable([]rule.Rule{{Domain: "x.com", Kind: rule.KindDynamic}})
-	s := New(tbl, res, &fakeProber{}, 5*time.Minute)
+	s := New(tbl, res, &fakeProber{}, 10*time.Second, 5*time.Minute)
 
 	if _, err := s.Pick(context.Background(), "x.com"); err == nil {
 		t.Fatal("无任何候选应返回错误")
@@ -208,7 +208,7 @@ type blockingProber struct {
 	calls atomic.Int64
 }
 
-func (b *blockingProber) Probe(_ context.Context, ip net.IP) time.Duration {
+func (b *blockingProber) Probe(_ context.Context, _ string, ip net.IP) time.Duration {
 	b.calls.Add(1)
 	if d, ok := b.delay[ip.String()]; ok {
 		time.Sleep(d)
@@ -227,7 +227,7 @@ func TestPick_DifferentDomainsDoNotBlockEachOther(t *testing.T) {
 		"1.1.1.1": 300 * time.Millisecond, // slow.test 候选：真实阻塞 300ms
 	}}
 	tbl := rule.NewTable([]rule.Rule{{Domain: "slow.test", Kind: rule.KindDynamic}, {Domain: "fast.test", Kind: rule.KindDynamic}})
-	s := New(tbl, res, prober, 5*time.Minute)
+	s := New(tbl, res, prober, 10*time.Second, 5*time.Minute)
 
 	doneSlow := make(chan time.Time, 1)
 	doneFast := make(chan time.Time, 1)
@@ -257,7 +257,7 @@ func TestSelector_PreloadFillsCache(t *testing.T) {
 	}}
 	prober := &fakeProber{}
 	tbl := rule.NewTable([]rule.Rule{{Domain: "a.test", Kind: rule.KindDynamic}})
-	s := New(tbl, res, prober, 5*time.Minute)
+	s := New(tbl, res, prober, 10*time.Second, 5*time.Minute)
 
 	s.Preload(context.Background(), []string{"a.test"}, 2)
 	afterPreload := prober.calls.Load()
@@ -290,7 +290,7 @@ func TestSetTable_DoesNotBlockOtherDomainsOnInflightProbe(t *testing.T) {
 		{Domain: "a.com", Kind: rule.KindDynamic},
 		{Domain: "b.com", Kind: rule.KindDynamic},
 	})
-	s := New(tbl, res, prober, 5*time.Minute)
+	s := New(tbl, res, prober, 10*time.Second, 5*time.Minute)
 
 	go func() { _, _ = s.Pick(context.Background(), "a.com") }()
 	time.Sleep(100 * time.Millisecond) // 等 a.com 进入慢探测
@@ -309,4 +309,60 @@ func TestSetTable_DoesNotBlockOtherDomainsOnInflightProbe(t *testing.T) {
 	}
 	<-setDone
 	_ = setDone
+}
+
+// ---- M5 Phase 2：失败即时反馈 + 选路生命周期回收 ----
+
+// 拨号失败上报应立即失效测速缓存（下次 Pick 重建重测，不等 TTL）
+func TestReportFailure_InvalidatesCache(t *testing.T) {
+	res := &fakeResolver{ips: []net.IP{ip("1.1.1.1")}}
+	tbl := rule.NewTable([]rule.Rule{{Domain: "github.com", Kind: rule.KindDynamic}})
+	s := New(tbl, res, &fakeProber{}, time.Minute, time.Minute)
+
+	_, _ = s.Pick(context.Background(), "github.com")
+	if res.calls != 1 {
+		t.Fatalf("首次 Pick 应解析一次: %d", res.calls)
+	}
+	s.ReportFailure("github.com", ip("1.1.1.1"))
+	_, _ = s.Pick(context.Background(), "github.com")
+	if res.calls != 2 {
+		t.Fatalf("失败上报后应重建候选（重新解析）: %d", res.calls)
+	}
+}
+
+// 首轮 TTL 短（10s 语义的注入版）：启动/预热时网络坏的自我纠正窗口
+func TestPick_FirstRoundShorterTTL(t *testing.T) {
+	res := &fakeResolver{ips: []net.IP{ip("1.1.1.1")}}
+	tbl := rule.NewTable([]rule.Rule{{Domain: "github.com", Kind: rule.KindDynamic}})
+	s := New(tbl, res, &fakeProber{}, 50*time.Millisecond, time.Hour)
+
+	_, _ = s.Pick(context.Background(), "github.com")
+	time.Sleep(60 * time.Millisecond) // 超过首轮 TTL
+	_, _ = s.Pick(context.Background(), "github.com")
+	if res.calls != 2 {
+		t.Fatalf("首轮 TTL 过期后应重建: %d", res.calls)
+	}
+	_, _ = s.Pick(context.Background(), "github.com") // 稳态 TTL 内
+	if res.calls != 2 {
+		t.Fatalf("进入稳态后不应频繁重建: %d", res.calls)
+	}
+}
+
+// 稳态节奏（Watt 10s/100s 语义）：首个缓存用 firstTTL，第二个起用 steadyTTL
+func TestPick_SteadyRoundTTL(t *testing.T) {
+	res := &fakeResolver{ips: []net.IP{ip("1.1.1.1")}}
+	tbl := rule.NewTable([]rule.Rule{{Domain: "github.com", Kind: rule.KindDynamic}})
+	s := New(tbl, res, &fakeProber{}, 30*time.Millisecond, 2*time.Second)
+
+	_, _ = s.Pick(context.Background(), "github.com") // 首个缓存（firstTTL 起算）
+	time.Sleep(40 * time.Millisecond)                 // > firstTTL(30ms)
+	_, _ = s.Pick(context.Background(), "github.com") // 重建 → 第二个缓存（steadyTTL 起算）
+	if res.calls != 2 {
+		t.Fatalf("首个缓存应按 firstTTL 过期重建: %d", res.calls)
+	}
+	time.Sleep(40 * time.Millisecond) // > firstTTL 但 < steadyTTL(2s)
+	_, _ = s.Pick(context.Background(), "github.com")
+	if res.calls != 2 {
+		t.Fatalf("稳态缓存应按 steadyTTL 存活（不受 firstTTL 影响）: %d", res.calls)
+	}
 }
