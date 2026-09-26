@@ -1,0 +1,59 @@
+# goreleaser 发布配置（M4）
+# 目标矩阵与构建约束（M3 已本机验证）：
+#   windows/linux：systray 走 syscall/dbus 纯 Go → CGO_ENABLED=0 任意 runner 可编
+#   darwin：systray_darwin.m 为 Objective-C → 必须 CGO + macOS 环境（CI 用 macos runner）
+#   darwin/amd64：macos-latest 是 ARM（Intel runner macos-13 已于 2025-12 退役），
+#     用 Xcode clang 单 SDK 双架构交叉：CC="clang -arch x86_64"
+version: 2
+
+project_name: light-github
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: light-github
+    main: ./cmd/light-github
+    binary: light-github
+    targets:
+      - darwin_arm64
+      - darwin_amd64
+      - windows_amd64
+      - linux_amd64
+    env:
+      - CGO_ENABLED=0 # 默认纯静态（win/linux）
+    overrides:
+      - goos: darwin
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+      - goos: darwin
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC=clang -arch x86_64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-dev"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"

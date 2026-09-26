@@ -5,3 +5,6 @@ spike/*/spike-*
 *.cache.json
 *.log
 .DS_Store
+
+# goreleaser 产物
+dist/
