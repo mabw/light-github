@@ -131,11 +131,18 @@ func TestLogs_KindAllMergesBothChannels(t *testing.T) {
 	if kinds["app"] == 0 || kinds["conn"] == 0 {
 		t.Fatalf("all 应合并两种通道: %v", kinds)
 	}
-	// 最新在前：首条 At >= 末条
+	// 最新在前：首条 At >= 末条。必须解析为时间比较——RFC3339Nano 截断
+	// 尾随零（.130000 → .13），字符串序 ≠ 时间序（CI 实测误报：
+	// .130113Z 字符串序小于 .13Z，时间上却更晚）
 	if len(entries) >= 2 {
 		first := entries[0].(map[string]any)["at"].(string)
 		last := entries[len(entries)-1].(map[string]any)["at"].(string)
-		if first < last {
+		tf, err1 := time.Parse(time.RFC3339Nano, first)
+		tl, err2 := time.Parse(time.RFC3339Nano, last)
+		if err1 != nil || err2 != nil {
+			t.Fatalf("时间戳不可解析: %q %q (%v %v)", first, last, err1, err2)
+		}
+		if tf.Before(tl) {
 			t.Fatalf("应按时间降序: %s < %s", first, last)
 		}
 	}
