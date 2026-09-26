@@ -55,20 +55,20 @@ func Normalize(domain, forward, fakeSNI string) Rule {
 
 // Table 规则表，支持精确与 *.suffix 通配匹配。
 type Table struct {
-	exact map[string]Rule // 精确域名 → 规则
-	wild  map[string]Rule // 裸后缀（去 *.）→ 通配规则
+	exact map[string][]Rule
+	wild  map[string][]Rule
 }
 
 // NewTable 构建规则表。重复域名以靠后的规则覆盖靠前的。
 func NewTable(rules []Rule) *Table {
-	t := &Table{exact: map[string]Rule{}, wild: map[string]Rule{}}
+	t := &Table{exact: map[string][]Rule{}, wild: map[string][]Rule{}}
 	for _, r := range rules {
 		d := normalizeDomain(r.Domain)
 		r.Domain = d
 		if suffix, ok := strings.CutPrefix(d, "*."); ok {
-			t.wild[suffix] = r
+			t.wild[suffix] = append(t.wild[suffix], r)
 		} else {
-			t.exact[d] = r
+			t.exact[d] = append(t.exact[d], r)
 		}
 	}
 	return t
@@ -81,8 +81,8 @@ func (t *Table) Match(domain string) (Rule, bool) {
 	if host, _, err := net.SplitHostPort(d); err == nil {
 		d = normalizeDomain(host)
 	}
-	if r, ok := t.exact[d]; ok {
-		return r, true
+	if rs, ok := t.exact[d]; ok && len(rs) > 0 {
+		return rs[0], true // 首条 = 高优先级源（构建序）
 	}
 	// 自右向左逐级取后缀查通配表（a.b.suffix → b.suffix → suffix）
 	for rest := d; ; {
@@ -91,8 +91,8 @@ func (t *Table) Match(domain string) (Rule, bool) {
 			break
 		}
 		rest = rest[idx+1:]
-		if r, ok := t.wild[rest]; ok {
-			return r, true
+		if rs, ok := t.wild[rest]; ok && len(rs) > 0 {
+			return rs[0], true
 		}
 	}
 	return Rule{}, false
@@ -105,4 +105,28 @@ func normalizeDomain(d string) string {
 // isUsableCandidate 同款过滤：回环/私有/链路本地/未指定地址不可作出口
 func isUsableIP(ip net.IP) bool {
 	return !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified())
+}
+
+// MatchAll 返回域名命中的全部规则（同名多源并存，按构建序=源优先级）。
+// Match 返回首条维持「高优先级胜出」；候选收集用本方法取全部 FixedIP
+// （M5-4：同名 FixedIP 多源并集——单一源全灭时其他源的同域 IP 仍可用）。
+func (t *Table) MatchAll(domain string) []Rule {
+	d := normalizeDomain(domain)
+	if host, _, err := net.SplitHostPort(d); err == nil {
+		d = normalizeDomain(host)
+	}
+	if rs, ok := t.exact[d]; ok {
+		return rs
+	}
+	for rest := d; ; {
+		idx := strings.IndexByte(rest, '.')
+		if idx < 0 {
+			break
+		}
+		rest = rest[idx+1:]
+		if rs, ok := t.wild[rest]; ok {
+			return rs
+		}
+	}
+	return nil
 }

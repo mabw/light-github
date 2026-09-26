@@ -273,18 +273,25 @@ func (s *Selector) buildCandidates(ctx context.Context, domain string, st *domai
 
 // candidateIPs 按规则策略产出原始候选（可能为空 + err）。
 func (s *Selector) candidateIPs(ctx context.Context, domain string) ([]net.IP, error) {
-	r, matched := s.currentTable().Match(domain)
+	matched := s.currentTable().MatchAll(domain)
 
-	if matched && r.Kind == rule.KindFixedIP {
-		if fixed := net.ParseIP(r.Forward); fixed != nil {
-			// 固定 IP 优先，DoH 补充
+	// 全部同名 FixedIP 依源优先级入候选（M5-4：多源并集），
+	// 后接 DoH 解析补充
+	if len(matched) > 0 && matched[0].Kind == rule.KindFixedIP {
+		var fixed []net.IP
+		for _, r := range matched {
+			if ip := net.ParseIP(r.Forward); ip != nil {
+				fixed = append(fixed, ip)
+			}
+		}
+		if len(fixed) > 0 {
 			supplement, _ := s.resolver.Resolve(ctx, domain)
-			return append([]net.IP{fixed}, supplement...), nil
+			return append(fixed, supplement...), nil
 		}
 	}
 	query := domain
-	if matched && r.Kind == rule.KindCNAME {
-		query = r.Forward
+	if len(matched) > 0 && matched[0].Kind == rule.KindCNAME {
+		query = matched[0].Forward
 	}
 	ips, err := s.resolver.Resolve(ctx, query)
 	if err != nil {

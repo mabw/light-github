@@ -112,3 +112,22 @@ func TestMatch_Miss(t *testing.T) {
 		t.Fatal("父域精确规则不应匹配子域")
 	}
 }
+
+// MatchAll 收集同名多源规则（M5-4），Match 仍返回首条（高优先级胜出）
+func TestTable_MatchAll_CollectsDuplicateDomains(t *testing.T) {
+	tbl := NewTable([]Rule{
+		{Domain: "github.com", Kind: KindFixedIP, Forward: "1.1.1.1"},
+		{Domain: "github.com", Kind: KindFixedIP, Forward: "2.2.2.2"},
+	})
+	r, ok := tbl.Match("github.com")
+	if !ok || r.Forward != "1.1.1.1" {
+		t.Fatalf("Match 应回首条: %+v", r)
+	}
+	all := tbl.MatchAll("github.com")
+	if len(all) != 2 || all[0].Forward != "1.1.1.1" || all[1].Forward != "2.2.2.2" {
+		t.Fatalf("MatchAll 应含全部同名规则: %+v", all)
+	}
+	if got := tbl.MatchAll("nobody.example"); got != nil {
+		t.Fatalf("未命中应返回 nil: %+v", got)
+	}
+}

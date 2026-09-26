@@ -326,22 +326,15 @@ func (m *Manager) Refresh(ctx context.Context) ([]rule.Rule, error) {
 
 // merge 按源优先级合并：先到者的域名占位，后来者仅补充新域名。
 func (m *Manager) merge(results []fetchResult) []rule.Rule {
-	merged := map[string]rule.Rule{}
-	var order []string
+	// 同名规则不去重（M5-4）：同名 FixedIP 多源并集进 Table（MatchAll），
+	// 单一源全灭时其他源的同域 IP 仍可用——封锁期 steampp 官方段 IP
+	// 全死而 GitHub520 社区 IP 存活的实测场景。顺序 = 源优先级。
+	var rules []rule.Rule
 	for _, res := range results {
 		if res.err != nil {
 			continue
 		}
-		for _, r := range res.rules {
-			if _, exists := merged[r.Domain]; !exists {
-				merged[r.Domain] = r
-				order = append(order, r.Domain)
-			}
-		}
-	}
-	rules := make([]rule.Rule, 0, len(order))
-	for _, d := range order {
-		rules = append(rules, merged[d])
+		rules = append(rules, res.rules...)
 	}
 
 	if m.CachePath != "" && len(rules) > 0 {

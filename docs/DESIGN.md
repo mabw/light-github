@@ -198,7 +198,7 @@ type Rule struct {
 | **M2 Web UI** ✅ 2026-09-25 完成 | 控制台（单文件页 + 7 端点）+ 双通道日志 + 配置持久化 | 见 §6.1；11 包 `-race` 全绿 |
 | **M3 平台层** ✅ 2026-09-26（macOS） | 托盘（octocat 图标/状态总闸/三开关菜单）+ 三平台自启 + `-no-tray` headless | macOS 全项实测（加速开关/PAC 接入还原/自启 plist/SIGTERM 与托盘退出清理闭环）；Windows/Linux 真机验证 → DEBT-8（M4） |
 | **M4 发布** ✅ 2026-09-26（v0.4.0） | goreleaser 四目标 + GitHub Actions（CI 双平台矩阵 + tag 发布）+ 安装文档 | [v0.4.0](https://github.com/mabw/light-github/releases/tag/v0.4.0) 四产物 + checksums；darwin amd64 用 `clang -arch` 交叉（Intel runner 已退役）；Windows/Linux 真机验证 → DEBT-7/8 |
-| **M5 稳定性**（规划中） | 选路 TLS 级验证 + 选路生命周期回收（10s/100s）+ 后台协程 panic 防护 + 拨号快超时 | 决策依据与机制调研见 [RESEARCH-WATT-STABILITY.md](RESEARCH-WATT-STABILITY.md)；触发场景：2026-09-26 两次环境级阻断暴露的选路差距 |
+| **M5 稳定性** ✅ 2026-09-26（v0.5.0） | 选路 TLS 级验证 + 生命周期回收（首 10s/稳态 100s）+ 失败即时失效 + 拨号分级超时（前 2 候选 2.5s）+ DoH 缓存 + safego 协程防护 | 决策依据见 [RESEARCH-WATT-STABILITY.md](RESEARCH-WATT-STABILITY.md)；连带修复测速黑洞拨号 bug（单用例 225s→0.9s） |
 
 ### 6.1 M2 架构要点（2026-09-25 定稿实现）
 

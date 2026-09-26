@@ -433,8 +433,12 @@ func (d *Deps) handlePAC(w http.ResponseWriter, r *http.Request) {
 	}
 	var patterns []string
 	if d.Rules != nil {
+		seen := map[string]bool{}
 		for _, rl := range d.Rules() {
-			patterns = append(patterns, rl.Domain)
+			if !seen[rl.Domain] { // 同名多源规则（M5-4）只出一行
+				seen[rl.Domain] = true
+				patterns = append(patterns, rl.Domain)
+			}
 		}
 	}
 

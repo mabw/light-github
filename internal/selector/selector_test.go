@@ -366,3 +366,29 @@ func TestPick_SteadyRoundTTL(t *testing.T) {
 		t.Fatalf("稳态缓存应按 steadyTTL 存活（不受 firstTTL 影响）: %d", res.calls)
 	}
 }
+
+// 同名多源 FixedIP 全部进入候选（M5-4：单一源全灭时其他源同域 IP 仍可用）
+func TestPick_AllFixedIPsFromDuplicateRules(t *testing.T) {
+	res := &fakeResolver{ips: []net.IP{ip("3.3.3.3")}}
+	tbl := rule.NewTable([]rule.Rule{
+		{Domain: "github.com", Kind: rule.KindFixedIP, Forward: "1.1.1.1"},
+		{Domain: "github.com", Kind: rule.KindFixedIP, Forward: "2.2.2.2"},
+	})
+	s := New(tbl, res, &fakeProber{}, 10*time.Second, 5*time.Minute)
+
+	ips, err := s.Pick(context.Background(), "github.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	has := func(want string) bool {
+		for _, x := range ips {
+			if x.String() == want {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("1.1.1.1") || !has("2.2.2.2") || !has("3.3.3.3") {
+		t.Fatalf("候选应含两条固定 IP 与 DoH 补充: %v", ips)
+	}
+}
