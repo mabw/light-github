@@ -47,7 +47,9 @@ jobs:
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go vet ./...
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./...
 
-      # 四目标构建冒烟（复用 goreleaser 配置，不发布）
-      - name: build all targets
+      # 四目标构建冒烟（复用 goreleaser 配置，不发布）；action 自带 goreleaser 安装
+      - uses: goreleaser/goreleaser-action@v6
         if: matrix.os == 'macos-latest'
-        run: goreleaser build --snapshot --clean
+        with:
+          version: latest
+          args: build --snapshot --clean
