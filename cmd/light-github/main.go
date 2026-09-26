@@ -45,7 +45,7 @@ const (
 
 // version 版本号：发布构建经 -ldflags "-X main.version=<tag>" 注入；
 // 本地 go build / go test 用此默认值（var 而非 const，-X 只能写入变量）。
-var version = "0.6.0"
+var version = "0.6.1"
 
 func main() {
 	var (
