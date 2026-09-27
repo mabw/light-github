@@ -14,6 +14,7 @@ type CandidateInfo struct {
 	CostMS  int64  `json:"costMs"`  // 测速中位耗时
 	Failure int    `json:"failure"` // 连续失败次数
 	Sunk    bool   `json:"sunk"`    // 已沉底（连续失败 ≥ 阈值）
+	Usable  bool   `json:"usable"`  // M5-13：false = 语义判死（已剔除出拨号列表），仅观测保留
 }
 
 // DomainInfo 单域名的探测状态。
@@ -70,6 +71,7 @@ func (s *Selector) Inspect() []DomainInfo {
 				CostMS:  c.cost.Milliseconds(),
 				Failure: c.failure,
 				Sunk:    sinkRank(c) == 1,
+				Usable:  c.usable,
 			}
 		}
 		info := DomainInfo{Domain: p.name, ProbedAt: st.probedAt, Candidates: cands}
