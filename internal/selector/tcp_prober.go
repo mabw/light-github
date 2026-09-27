@@ -39,14 +39,28 @@ func (p *MedianProber) defaults() (count int, timeout time.Duration, port string
 	return count, timeout, port
 }
 
+// checkResult 应用层验证三态（M5-13）：
+//   - checkAlive：服务该域，健康
+//   - checkNetFail：网络层失败（超时/握手失败/TCP 断）——时序抖动，候选
+//     保留交由拨号方翻盘（测速窗口死 ≠ 拨号窗口死）
+//   - checkSemanticDead：确定性不服务该域（200 裸 text/plain 健康节点/
+//     3xx 重定向/400 跨域路由）——彻底剔除出拨号列表
+type checkResult int
+
+const (
+	checkNetFail checkResult = iota
+	checkAlive
+	checkSemanticDead
+)
+
 // Probe implements Prober.
-func (p *MedianProber) Probe(ctx context.Context, domain string, ip net.IP) time.Duration {
+func (p *MedianProber) Probe(ctx context.Context, domain string, ip net.IP) (time.Duration, bool) {
 	count, timeout, port := p.defaults()
 
 	costs := make([]time.Duration, 0, count)
 	for i := 0; i < count; i++ {
 		if err := ctx.Err(); err != nil {
-			return timeout
+			return timeout, true
 		}
 		start := time.Now()
 		// DialContext 而非 DialTimeout（review N4）：ctx 取消时单次拨号立即中止，
@@ -63,25 +77,28 @@ func (p *MedianProber) Probe(ctx context.Context, domain string, ip net.IP) time
 		costs = append(costs, cost)
 	}
 
-	// 应用层验证：真实 HEAD 请求（握手 + 证书域身份 + 响应码），失败按
-	// 超时值惩罚（排序自然沉底）
-	if !p.httpOK(ctx, domain, ip, port, timeout) {
-		return timeout
+	// 应用层验证：真实 HEAD 请求（握手 + 证书域身份 + 响应形态）
+	switch p.httpCheck(ctx, domain, ip, port, timeout) {
+	case checkAlive:
+		sort.Slice(costs, func(i, j int) bool { return costs[i] < costs[j] })
+		return costs[len(costs)/2], true
+	case checkSemanticDead:
+		return timeout, false // 确定性错：剔除（M5-13）
+	default: // checkNetFail：时序抖动，惩罚排序但保留
+		return timeout, true
 	}
-
-	sort.Slice(costs, func(i, j int) bool { return costs[i] < costs[j] })
-	return costs[len(costs)/2]
 }
 
-// httpOK 经指定 IP 发一次真实 HEAD https://domain/ 请求：完整走 TLS 握手
-// （SNI=域名）+ 证书域身份校验 + 应用层响应码，任一环失败即 false。
+// httpCheck 经指定 IP 发一次真实 HEAD https://domain/ 请求：完整走 TLS
+// 握手（SNI=域名）+ 证书域身份校验 + 应用层响应形态，返回三态判定。
 // 仅 TLS 层验证不够——实测同段 IP 证书全部匹配但应用层混杂 200/400
 // （GitHub 边缘按 IP 分工路由，400 即 "Whoa there!" 页，浏览器故障来源）。
 // 响应码判定：<500 且非 400——400 是跨域路由拒绝；404/405 是服务该域
 // 仅无此资源（资产类域 GET / 常 404）。CA 链校验留给端到端客户端完成
 // ——测速是初筛而非安全边界。
-func (p *MedianProber) httpOK(ctx context.Context, domain string, ip net.IP, port string, timeout time.Duration) bool {
+func (p *MedianProber) httpCheck(ctx context.Context, domain string, ip net.IP, port string, timeout time.Duration) checkResult {
 	addr := net.JoinHostPort(ip.String(), port)
+	certMismatch := false // 证书域不匹配是确定性身份错（区别于 RST/超时的网络抖动）
 	tr := &http.Transport{
 		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
@@ -100,7 +117,11 @@ func (p *MedianProber) httpOK(ctx context.Context, domain string, ip net.IP, por
 					if err != nil {
 						return err
 					}
-					return c.VerifyHostname(domain)
+					if err := c.VerifyHostname(domain); err != nil {
+						certMismatch = true
+						return err
+					}
+					return nil
 				},
 			})
 			if err := tc.HandshakeContext(ctx); err != nil {
@@ -112,7 +133,7 @@ func (p *MedianProber) httpOK(ctx context.Context, domain string, ip net.IP, por
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, "https://"+domain+"/", nil)
 	if err != nil {
-		return false
+		return checkNetFail
 	}
 	// 禁用重定向跟随（M5-11）：拿原始响应判定——默认跟随会把「301 到别域」
 	// 洗成「最终 200」（实测 api.github.com 被 web 前端 IP 301 到 github.com/，
@@ -126,13 +147,16 @@ func (p *MedianProber) httpOK(ctx context.Context, domain string, ip net.IP, por
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return false
+		if certMismatch {
+			return checkSemanticDead // 证书域不匹配：服务器不属于该域，确定性身份错
+		}
+		return checkNetFail
 	}
 	defer resp.Body.Close()
 
 	// 重定向：此 IP 把该域指到别处 = 不服务该域（跨域路由形态）
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return false
+		return checkSemanticDead
 	}
 
 	// 健康节点指纹（M5-10）：GitHub 边缘存在独立健康服务（实测 140.82.114.22，
@@ -143,7 +167,10 @@ func (p *MedianProber) httpOK(ctx context.Context, domain string, ip net.IP, por
 	// registry json、404 资产域不在此列），故该指纹判死。
 	if resp.StatusCode == http.StatusOK &&
 		strings.HasPrefix(strings.TrimSpace(resp.Header.Get("Content-Type")), "text/plain") {
-		return false
+		return checkSemanticDead
 	}
-	return resp.StatusCode < 500 && resp.StatusCode != http.StatusBadRequest
+	if resp.StatusCode < 500 && resp.StatusCode != http.StatusBadRequest {
+		return checkAlive
+	}
+	return checkSemanticDead // 400/5xx：跨域路由拒绝或服务端拒绝，确定性形态
 }

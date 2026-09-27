@@ -43,15 +43,19 @@ type Resolver interface {
 	Resolve(ctx context.Context, domain string) ([]net.IP, error)
 }
 
-// Prober 单 IP 出口质量探测（TCP 建连中位耗时 + TLS 握手验证；失败返回惩罚值）。
+// Prober 单 IP 出口质量探测（TCP 建连中位耗时 + TLS/应用层验证）。
+// 第二返回值 usable=false 表示**语义判死**（指纹/301/400：该 IP 确定性
+// 不服务此域）——此类候选彻底剔除出拨号列表（M5-13）；网络抖动（超时/
+// 握手失败）只返回惩罚 cost，候选保留交由拨号方时序翻盘。
 type Prober interface {
-	Probe(ctx context.Context, domain string, ip net.IP) time.Duration
+	Probe(ctx context.Context, domain string, ip net.IP) (cost time.Duration, usable bool)
 }
 
 type candidate struct {
 	ip      net.IP
 	cost    time.Duration // 测速中位耗时
 	failure int           // 连续失败次数
+	usable  bool          // 测速语义判定（false = 确定性不服务该域，剔除拨号）
 }
 
 type domainState struct {
@@ -202,9 +206,15 @@ func (s *Selector) Pick(ctx context.Context, domain string) ([]net.IP, error) {
 		return ordered[i].cost < ordered[j].cost
 	})
 
-	ips := make([]net.IP, len(ordered))
-	for i, c := range ordered {
-		ips[i] = c.ip
+	// 语义判死的候选不进拨号列表（M5-13）：只排序沉底不够——波动期前序
+	// 候选全失败时拨号轮换仍会撞上健康节点（TCP+TLS 通，拨号"成功"，
+	// 隧道内裸 "OK"，零解密架构无感知）。全部判死返回空列表，
+	// 拨号侧自然走直连兜底（确定性错 IP 不值得尝试）。
+	ips := make([]net.IP, 0, len(ordered))
+	for _, c := range ordered {
+		if c.usable {
+			ips = append(ips, c.ip)
+		}
 	}
 	return ips, nil
 }
@@ -296,7 +306,8 @@ func (s *Selector) buildCandidates(ctx context.Context, domain string, st *domai
 		i, ip := i, ip
 		safego.Go("probe", nil, func() {
 			defer wg.Done()
-			cands[i] = candidate{ip: ip, cost: s.prober.Probe(ctx, domain, ip)}
+			cost, usable := s.prober.Probe(ctx, domain, ip)
+			cands[i] = candidate{ip: ip, cost: cost, usable: usable}
 		})
 	}
 	wg.Wait()

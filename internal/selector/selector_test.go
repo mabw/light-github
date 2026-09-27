@@ -27,15 +27,19 @@ func (f *fakeResolver) Resolve(_ context.Context, domain string) ([]net.IP, erro
 
 type fakeProber struct {
 	costs map[string]time.Duration // ip → 耗时；未配置的返回 10ms
+	dead  map[string]bool          // ip → 语义判死（指纹/301：确定性不服务该域）
 	calls atomic.Int64             // 并发测速下原子计数（buildCandidates 每 IP 一个 goroutine）
 }
 
-func (f *fakeProber) Probe(_ context.Context, _ string, ip net.IP) time.Duration {
+func (f *fakeProber) Probe(_ context.Context, _ string, ip net.IP) (time.Duration, bool) {
 	f.calls.Add(1)
-	if d, ok := f.costs[ip.String()]; ok {
-		return d
+	if f.dead != nil && f.dead[ip.String()] {
+		return time.Second, false
 	}
-	return 10 * time.Millisecond
+	if d, ok := f.costs[ip.String()]; ok {
+		return d, true
+	}
+	return 10 * time.Millisecond, true
 }
 
 func ip(s string) net.IP { return net.ParseIP(s) }
@@ -208,13 +212,13 @@ type blockingProber struct {
 	calls atomic.Int64
 }
 
-func (b *blockingProber) Probe(_ context.Context, _ string, ip net.IP) time.Duration {
+func (b *blockingProber) Probe(_ context.Context, _ string, ip net.IP) (time.Duration, bool) {
 	b.calls.Add(1)
 	if d, ok := b.delay[ip.String()]; ok {
 		time.Sleep(d)
-		return d
+		return d, true
 	}
-	return time.Millisecond
+	return time.Millisecond, true
 }
 
 // DEBT-4：域名 A 测速期间（真阻塞 prober），域名 B 的 Pick 不应被全局锁阻塞
@@ -511,5 +515,46 @@ func TestPick_SubdomainDoesNotBorrow(t *testing.T) {
 		if x.String() == "20.207.9.9" || x.String() == "140.82.9.9" {
 			t.Fatalf("子域不应借段（借来的 IP 不服务该域，301 隐性故障）: %v", ips)
 		}
+	}
+}
+
+// M5-13：语义判死（指纹/301）的候选彻底剔除出拨号列表——只排序沉底不够：
+// 波动期前序候选全失败时拨号轮换仍会撞上健康节点（TCP+TLS 通，拨号
+// "成功"，隧道内裸 "OK"——2026-09-27 用户实测「还是偶尔出现 ok」，
+// 连接日志 10:02:18 github.com→140.82.114.22 复现）。
+func TestPick_SemanticDeadCandidateExcluded(t *testing.T) {
+	res := &fakeResolver{ips: []net.IP{ip("1.1.1.1"), ip("2.2.2.2")}}
+	prober := &fakeProber{dead: map[string]bool{"2.2.2.2": true}}
+	tbl := rule.NewTable([]rule.Rule{{Domain: "github.com", Kind: rule.KindDynamic}})
+	s := New(tbl, res, prober, 10*time.Second, 5*time.Minute)
+
+	ips, err := s.Pick(context.Background(), "github.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range ips {
+		if x.String() == "2.2.2.2" {
+			t.Fatalf("语义判死候选不应出现在拨号列表: %v", ips)
+		}
+	}
+	if len(ips) == 0 {
+		t.Fatal("活候选应保留")
+	}
+}
+
+// 全部语义判死 → 返回空列表（proxy 侧 ips 空 → 直连兜底接管；
+// 确定性错 IP 不值得拨号尝试）
+func TestPick_AllSemanticDeadReturnsEmpty(t *testing.T) {
+	res := &fakeResolver{ips: []net.IP{ip("1.1.1.1")}}
+	prober := &fakeProber{dead: map[string]bool{"1.1.1.1": true}}
+	tbl := rule.NewTable([]rule.Rule{{Domain: "github.com", Kind: rule.KindDynamic}})
+	s := New(tbl, res, prober, 10*time.Second, 5*time.Minute)
+
+	ips, err := s.Pick(context.Background(), "github.com")
+	if err != nil {
+		t.Fatalf("全 dead 是确定性结论，不是错误: %v", err)
+	}
+	if len(ips) != 0 {
+		t.Fatalf("全 dead 应返回空（拨号侧走兜底）: %v", ips)
 	}
 }

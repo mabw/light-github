@@ -27,8 +27,8 @@ func (s stubResolver) Resolve(context.Context, string) ([]net.IP, error) { retur
 
 type stubProber struct{}
 
-func (stubProber) Probe(_ context.Context, _ string, ip net.IP) time.Duration {
-	return 10 * time.Millisecond
+func (stubProber) Probe(_ context.Context, _ string, _ net.IP) (time.Duration, bool) {
+	return 10 * time.Millisecond, true
 }
 
 type stubFetcher struct{}

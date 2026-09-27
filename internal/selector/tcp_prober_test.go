@@ -17,9 +17,12 @@ func TestMedianProber_TLSHandshakeOK(t *testing.T) {
 	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
 
 	p := &MedianProber{Count: 3, Timeout: time.Second, Port: port}
-	cost := p.Probe(context.Background(), "example.com", net.ParseIP(host))
+	cost, usable := p.Probe(context.Background(), "example.com", net.ParseIP(host))
 	if cost >= time.Second {
 		t.Fatalf("TLS 可达 IP 测速应远小于超时值: %v", cost)
+	}
+	if !usable {
+		t.Fatal("健康候选 usable 应为 true")
 	}
 }
 
@@ -31,9 +34,12 @@ func TestMedianProber_PlainTCPRejected(t *testing.T) {
 	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
 
 	p := &MedianProber{Count: 2, Timeout: 300 * time.Millisecond, Port: port}
-	cost := p.Probe(context.Background(), "127.0.0.1", net.ParseIP(host))
+	cost, usable := p.Probe(context.Background(), "127.0.0.1", net.ParseIP(host))
 	if cost != 300*time.Millisecond {
 		t.Fatalf("TLS 握手失败的候选应按超时值惩罚: %v", cost)
+	}
+	if !usable {
+		t.Fatal("TLS 握手失败是网络层抖动（非语义错），候选应保留（usable=true）")
 	}
 }
 
@@ -41,9 +47,12 @@ func TestMedianProber_UnreachableIPIsPenalized(t *testing.T) {
 	p := &MedianProber{Count: 2, Timeout: 300 * time.Millisecond, Port: "443"}
 	// 240.0.0.1 保留地址必然不可达（黑洞丢包型，非快速 RST）
 	start := time.Now()
-	cost := p.Probe(context.Background(), "example.com", net.ParseIP("240.0.0.1"))
+	cost, usable := p.Probe(context.Background(), "example.com", net.ParseIP("240.0.0.1"))
 	if cost != 300*time.Millisecond {
 		t.Fatalf("不可达 IP 应按超时值惩罚: %v", cost)
+	}
+	if !usable {
+		t.Fatal("不可达是网络层失败（非语义错），候选应保留（usable=true）")
 	}
 	// 拨号器必须自带 Timeout：零值 Dialer 的拨号只受 ctx 约束，
 	// 黑洞 IP 会等 OS 级 TCP 超时（~75s/次）——实测曾致单用例 225s
@@ -57,7 +66,7 @@ func TestMedianProber_ContextCancelShortCircuits(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	start := time.Now()
-	_ = p.Probe(ctx, "example.com", net.ParseIP("240.0.0.1"))
+	_, _ = p.Probe(ctx, "example.com", net.ParseIP("240.0.0.1"))
 	if time.Since(start) > 100*time.Millisecond {
 		t.Fatal("ctx 已取消应立即返回")
 	}
@@ -71,9 +80,12 @@ func TestMedianProber_CertDomainMismatchRejected(t *testing.T) {
 	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
 
 	p := &MedianProber{Count: 1, Timeout: 300 * time.Millisecond, Port: port}
-	cost := p.Probe(context.Background(), "github.com", net.ParseIP(host)) // SNI/校验域=github.com
+	cost, usable := p.Probe(context.Background(), "github.com", net.ParseIP(host)) // SNI/校验域=github.com
 	if cost != 300*time.Millisecond {
 		t.Fatalf("证书域不匹配的候选应按超时值惩罚: %v", cost)
+	}
+	if usable {
+		t.Fatal("证书域不匹配是确定性身份错，usable 应为 false")
 	}
 }
 
@@ -87,9 +99,12 @@ func TestMedianProber_App400Rejected(t *testing.T) {
 	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
 
 	p := &MedianProber{Count: 1, Timeout: 300 * time.Millisecond, Port: port}
-	cost := p.Probe(context.Background(), "example.com", net.ParseIP(host))
+	cost, usable := p.Probe(context.Background(), "example.com", net.ParseIP(host))
 	if cost != 300*time.Millisecond {
 		t.Fatalf("应用层 400 的候选应按超时值惩罚: %v", cost)
+	}
+	if usable {
+		t.Fatal("400 跨域路由是确定性语义错，usable 应为 false")
 	}
 }
 
@@ -102,9 +117,12 @@ func TestMedianProber_App404StillAlive(t *testing.T) {
 	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
 
 	p := &MedianProber{Count: 1, Timeout: 300 * time.Millisecond, Port: port}
-	cost := p.Probe(context.Background(), "example.com", net.ParseIP(host))
+	cost, usable := p.Probe(context.Background(), "example.com", net.ParseIP(host))
 	if cost >= 300*time.Millisecond {
 		t.Fatalf("404 是服务中（无此资源），不应惩罚: %v", cost)
+	}
+	if !usable {
+		t.Fatal("404 是服务中（资产类域常见），usable 应为 true")
 	}
 }
 
@@ -121,9 +139,12 @@ func TestMedianProber_HealthEndpointRejected(t *testing.T) {
 	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
 
 	p := &MedianProber{Count: 1, Timeout: 300 * time.Millisecond, Port: port}
-	cost := p.Probe(context.Background(), "example.com", net.ParseIP(host))
+	cost, usable := p.Probe(context.Background(), "example.com", net.ParseIP(host))
 	if cost != 300*time.Millisecond {
 		t.Fatalf("200 text/plain 健康节点应按超时值惩罚: %v", cost)
+	}
+	if usable {
+		t.Fatal("健康节点指纹是确定性语义错，usable 应为 false（剔除拨号）")
 	}
 }
 
@@ -138,9 +159,12 @@ func TestMedianProber_App200JSONStillAlive(t *testing.T) {
 	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
 
 	p := &MedianProber{Count: 1, Timeout: 300 * time.Millisecond, Port: port}
-	cost := p.Probe(context.Background(), "example.com", net.ParseIP(host))
+	cost, usable := p.Probe(context.Background(), "example.com", net.ParseIP(host))
 	if cost >= 300*time.Millisecond {
 		t.Fatalf("200 JSON 是正常 API 服务，不应惩罚: %v", cost)
+	}
+	if !usable {
+		t.Fatal("200 JSON 是正常服务，usable 应为 true")
 	}
 }
 
@@ -165,8 +189,11 @@ func TestMedianProber_RedirectRejected(t *testing.T) {
 	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
 
 	p := &MedianProber{Count: 1, Timeout: 300 * time.Millisecond, Port: port}
-	cost := p.Probe(context.Background(), "api.example.com", net.ParseIP(host))
+	cost, usable := p.Probe(context.Background(), "api.example.com", net.ParseIP(host))
 	if cost != 300*time.Millisecond {
 		t.Fatalf("301 重定向（不服务该域）应按超时值惩罚: %v", cost)
+	}
+	if usable {
+		t.Fatal("301 重定向是确定性语义错，usable 应为 false（剔除拨号）")
 	}
 }
