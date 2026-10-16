@@ -5,8 +5,10 @@
 //   - CNAME：DoH 解析 Forward 域名（官方防污染 CNAME 通道）
 //   - Dynamic / 未匹配：DoH 解析原域名
 //
-// 失败统计借鉴 dev-sidecar 的 DynamicChoice：连续失败达阈值的 IP 沉底（不删除，
-// 保留为最后候选），连接成功即重置计数。
+// 失败统计借鉴 dev-sidecar 的 DynamicChoice 并演进为时间窗计数（2026-10-16
+// 拨号日志实证：黑洞 IP 夹杂偶发成功，连续计数被成功反复洗白——20.205.243.166
+// 单 IP 累计 132 次拨号超时仍居队首）：窗口期（默认 10min）内失败达阈值的 IP
+// 沉底（不删除，保留为最后候选），窗口滑出自动恢复；成功不洗白窗口内失败。
 //
 // 并发模型（DEBT-4）：锁按域名分片——states map 仅短锁取 state，测速等网络 IO
 // 在 state 级锁内进行，不同域名的 Pick 互不阻塞。
@@ -15,6 +17,7 @@ package selector
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"sort"
 	"strings"
@@ -52,10 +55,22 @@ type Prober interface {
 }
 
 type candidate struct {
-	ip      net.IP
-	cost    time.Duration // 测速中位耗时
-	failure int           // 连续失败次数
-	usable  bool          // 测速语义判定（false = 确定性不服务该域，剔除拨号）
+	ip         net.IP
+	cost       time.Duration // 测速中位耗时
+	failStamps []time.Time   // 拨号失败时刻（窗口内计数；过期由读取方按窗口判定）
+	usable     bool          // 测速语义判定（false = 确定性不服务该域，剔除拨号）
+}
+
+// recentFails 窗口内失败次数（纯读取不修剪——candidate 常被浅拷贝进排序
+// 切片，原位修剪会经共享底层数组污染其他副本）。
+func (c *candidate) recentFails(now time.Time, window time.Duration) int {
+	n := 0
+	for _, t := range c.failStamps {
+		if now.Sub(t) < window {
+			n++
+		}
+	}
+	return n
 }
 
 type domainState struct {
@@ -94,6 +109,13 @@ type Selector struct {
 	// 零值用默认 5s。测试可注入短值。
 	RebuildCooldown time.Duration
 
+	// FailureWindow 失败计数时间窗（抖动 IP 熔断）：窗口内失败 ≥ sinkThreshold
+	// 沉底，窗口滑出自动恢复，成功不洗白。零值用默认 10min。测试可注入短值。
+	FailureWindow time.Duration
+
+	// Log 运行日志出口（沉底等低频高信号事件）；nil 用 slog.Default。
+	Log *slog.Logger
+
 	tblMu sync.RWMutex // 规则表热更新（数据源刷新时 SetTable 换入）
 
 	mu     sync.Mutex // 仅保护 states map 的读写
@@ -121,6 +143,23 @@ func (s *Selector) cooldown() time.Duration {
 		return s.RebuildCooldown
 	}
 	return 5 * time.Second
+}
+
+// failureWindow 返回生效的失败计数窗口（零值回默认）。
+func (s *Selector) failureWindow() time.Duration {
+	if s.FailureWindow > 0 {
+		return s.FailureWindow
+	}
+	return 10 * time.Minute
+}
+
+// logger 返回运行日志出口（Log 未注入时退到默认——沉底事件是事后排障
+// 「为何该 IP 沉底/未沉底」的关键证据，不应因注入缺失而丢失）。
+func (s *Selector) logger() *slog.Logger {
+	if s.Log != nil {
+		return s.Log
+	}
+	return slog.Default()
 }
 
 // SetTable 原子替换规则表并清空测速缓存时间戳（策略已变，
@@ -198,10 +237,17 @@ func (s *Selector) Pick(ctx context.Context, domain string) ([]net.IP, error) {
 
 	ordered := make([]candidate, len(st.candidates))
 	copy(ordered, st.candidates)
+	// 沉底判定预计算（窗口计数每候选只算一次，不进比较器）
+	now, window := time.Now(), s.failureWindow()
+	rank := make([]int, len(ordered))
+	for i := range ordered {
+		if ordered[i].recentFails(now, window) >= sinkThreshold {
+			rank[i] = 1
+		}
+	}
 	sort.SliceStable(ordered, func(i, j int) bool {
-		si, sj := sinkRank(ordered[i]), sinkRank(ordered[j])
-		if si != sj {
-			return si < sj
+		if rank[i] != rank[j] {
+			return rank[i] < rank[j]
 		}
 		return ordered[i].cost < ordered[j].cost
 	})
@@ -252,19 +298,40 @@ func (s *Selector) ReportFailure(domain string, ip net.IP) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if c := findCandidate(st.candidates, ip); c != nil {
-		c.failure++
+		c.failStamps = append(c.failStamps, time.Now())
+		if len(c.failStamps) > 16 { // 有界：窗口内计数无需无界历史
+			c.failStamps = c.failStamps[len(c.failStamps)-16:]
+		}
+		// 沉底跨阈值事件（恰等判定：每次跨越只记一次，不重复刷屏）——
+		// 事后回答「该 IP 为何沉底/为何还在队首」的直接证据
+		if n := c.recentFails(time.Now(), s.failureWindow()); n == sinkThreshold {
+			s.logger().Warn("候选窗口内失败达到阈值，沉底",
+				"domain", domain, "ip", ip.String(),
+				"windowFails", n, "window", s.failureWindow().String())
+		}
 	}
 	st.dirty = true // 下次 Pick 重建重测；不清 probedAt（Inspect 重建前仍展示旧候选）
 }
 
-// ReportSuccess 上报连接成功（重置失败计数）。
+// ReportSuccess 上报连接成功：仅修剪窗口外失败戳，不清零窗口内计数——
+// 抖动 IP（偶发成功夹杂超时，2026-10-16 日志：20.207.73.82 同 IP 54 次超时
+// 与秒连成功并存）不再被成功洗白回队首；窗口滑出自然恢复。
 func (s *Selector) ReportSuccess(domain string, ip net.IP) {
 	st := s.stateFor(domain)
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if c := findCandidate(st.candidates, ip); c != nil {
-		c.failure = 0
+	c := findCandidate(st.candidates, ip)
+	if c == nil {
+		return
 	}
+	now, window := time.Now(), s.failureWindow()
+	pruned := make([]time.Time, 0, len(c.failStamps))
+	for _, t := range c.failStamps {
+		if now.Sub(t) < window {
+			pruned = append(pruned, t)
+		}
+	}
+	c.failStamps = pruned
 }
 
 func findCandidate(cands []candidate, ip net.IP) *candidate {
@@ -312,10 +379,10 @@ func (s *Selector) buildCandidates(ctx context.Context, domain string, st *domai
 	}
 	wg.Wait()
 
-	// 沿用历史失败计数（测速刷新不应清零运行期失败记忆）
+	// 沿用历史失败戳（测速刷新不应清零运行期失败记忆；过期由读取时窗口判定）
 	for i := range cands {
 		if old := findCandidate(st.candidates, cands[i].ip); old != nil {
-			cands[i].failure = old.failure
+			cands[i].failStamps = old.failStamps
 		}
 	}
 	return cands, nil
@@ -417,9 +484,7 @@ func rootDomain(d string) string {
 	return parts[len(parts)-2] + "." + parts[len(parts)-1]
 }
 
-func sinkRank(c candidate) int {
-	if c.failure >= sinkThreshold {
-		return 1
-	}
-	return 0
+// sunk 窗口内失败是否已达沉底阈值。
+func (s *Selector) sunk(c *candidate, now time.Time) bool {
+	return c.recentFails(now, s.failureWindow()) >= sinkThreshold
 }

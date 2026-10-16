@@ -120,6 +120,7 @@ func main() {
 
 	// 选择器 + 后台预热（首请求命中缓存）
 	sel := selector.New(table, doh.New(), &selector.MedianProber{}, 10*time.Second, 100*time.Second)
+	sel.Log = log // 沉底等选路事件进运行日志（app.log）
 	safego.Go("preload", log, func() { sel.Preload(ctx, preloadDomains(rules), 4) })
 
 	// 指标 + 连接日志落盘钩子

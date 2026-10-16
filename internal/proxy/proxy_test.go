@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,20 +24,37 @@ import (
 type fakeDialer struct {
 	ips      []net.IP
 	err      error
+	mu       sync.Mutex // 竞速拨号下多个 racer 并发回调，替身字段需并发安全
 	picks    int
 	success  []string
 	failures []string
 }
 
 func (f *fakeDialer) Pick(_ context.Context, _ string) ([]net.IP, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.picks++
 	return f.ips, f.err
 }
 func (f *fakeDialer) ReportFailure(_ string, ip net.IP) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.failures = append(f.failures, ip.String())
 }
 func (f *fakeDialer) ReportSuccess(_ string, ip net.IP) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.success = append(f.success, ip.String())
+}
+
+// snapshotFailures 加锁快照（竞速 racer 异步上报期间，测试侧轮询/断言
+// 不得裸读共享 slice）。
+func (f *fakeDialer) snapshotFailures() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.failures))
+	copy(out, f.failures)
+	return out
 }
 
 // newStack 启动代理 + fake 上游，返回代理 URL 与清理函数
@@ -137,8 +155,15 @@ func TestProxy_FallsBackToNextCandidateOnDialFailure(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("应回退到第二候选成功: %d", resp.StatusCode)
 	}
-	if len(dialer.failures) == 0 {
-		t.Fatal("失败候选应上报 ReportFailure")
+	// 注：竞速拨号下首候选 240.0.0.1 的超时通常晚于胜者（127.0.0.1 错峰
+	// 300ms 即握手成功）返回，失败上报是 racer goroutine 异步完成的——
+	// 轮询等待，避免竞态假失败。
+	deadline := time.Now().Add(3 * time.Second)
+	for len(dialer.snapshotFailures()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if fs := dialer.snapshotFailures(); len(fs) == 0 {
+		t.Fatal("失败候选应（异步）上报 ReportFailure")
 	}
 }
 
@@ -513,8 +538,9 @@ func TestProxy_FirstCandidatesFailFast(t *testing.T) {
 	}
 }
 
-// M5-7：候选全灭时最多试 maxDialAttempts 个即 502——逐个试完 8 个要 35s+，
-// 快速失败让浏览器自行重试体验更好
+// M5-7→竞速演进：候选全灭时最多竞速 raceWidth 个即 502——串行逐个试完
+// 8 个要 35s+，竞速最坏 错峰×(宽度-1)+单候选拨号超时；快速失败让浏览器
+// 自行重试体验更好
 func TestProxy_CapsDialAttempts(t *testing.T) {
 	dialer := &fakeDialer{ips: []net.IP{
 		net.ParseIP("240.0.0.1"), net.ParseIP("240.0.0.2"), net.ParseIP("240.0.0.3"),
@@ -527,8 +553,12 @@ func TestProxy_CapsDialAttempts(t *testing.T) {
 	if err == nil {
 		resp.Body.Close()
 	}
-	if len(dialer.failures) > 4 {
-		t.Fatalf("候选全灭应最多尝试 %d 个（快速失败），实际 %d", 4, len(dialer.failures))
+	deadline := time.Now().Add(3 * time.Second) // racer 失败上报在其拨号超时时刻异步发生
+	for len(dialer.snapshotFailures()) <= raceWidth && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := len(dialer.snapshotFailures()); n > raceWidth {
+		t.Fatalf("候选全灭应最多竞速 %d 个（快速失败），实际 %d", raceWidth, n)
 	}
 }
 
@@ -728,7 +758,13 @@ func TestProxy_StrikeClearedOnSuccess(t *testing.T) {
 		}
 		resp.Body.Close()
 	}
-	if len(dialer.failures) != 3 {
-		t.Fatalf("每次首候选失败都应上报且不触发降级（成功清零）: %v", dialer.failures)
+	// 竞速拨号：每轮落败者的失败上报在其拨号超时时刻异步发生（晚于该轮
+	// 响应返回），轮询等待第 3 份上报，避免竞态假失败。
+	deadline := time.Now().Add(3 * time.Second)
+	for len(dialer.snapshotFailures()) < 3 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if fs := dialer.snapshotFailures(); len(fs) != 3 {
+		t.Fatalf("每次首候选失败都应上报且不触发降级（成功清零）: %v", fs)
 	}
 }

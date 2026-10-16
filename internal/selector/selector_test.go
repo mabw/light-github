@@ -158,19 +158,40 @@ func TestPick_RepeatedFailureSinksIP(t *testing.T) {
 	}
 }
 
-func TestPick_SuccessResetsFailureCount(t *testing.T) {
+// 2026-10-16 语义演进：成功不再清零窗口内失败——抖动 IP（偶发成功夹杂
+// 超时；拨号日志实证 20.207.73.82 同 IP 54 次超时与秒连成功并存）在连续
+// 计数下被成功反复洗白回队首。窗口计数下窗口期满自动恢复（见下个测试）。
+func TestPick_FlappingSuccessDoesNotLaunderFailures(t *testing.T) {
 	res := &fakeResolver{ips: []net.IP{ip("1.1.1.1"), ip("2.2.2.2")}}
 	tbl := rule.NewTable([]rule.Rule{{Domain: "x.com", Kind: rule.KindDynamic}})
 	s := New(tbl, res, &fakeProber{}, 10*time.Second, 5*time.Minute)
 
 	s.Pick(context.Background(), "x.com")
 	s.ReportFailure("x.com", ip("1.1.1.1"))
-	s.ReportSuccess("x.com", ip("1.1.1.1")) // 成功重置计数
-	s.ReportFailure("x.com", ip("1.1.1.1")) // 重新累计第一次
+	s.ReportSuccess("x.com", ip("1.1.1.1")) // 抖动成功：不洗白窗口内失败
+	s.ReportFailure("x.com", ip("1.1.1.1")) // 窗口内第二次失败 → 沉底
+
+	ips, _ := s.Pick(context.Background(), "x.com")
+	if ips[0].Equal(ip("1.1.1.1")) {
+		t.Fatalf("窗口内两次失败的抖动 IP 应沉底: %v", ips)
+	}
+}
+
+// 熔断是时间窗语义而非永久拉黑：窗口滑出后失败戳过期，IP 恢复原排序。
+func TestPick_FailureWindowExpiryRecoversRank(t *testing.T) {
+	res := &fakeResolver{ips: []net.IP{ip("1.1.1.1"), ip("2.2.2.2")}}
+	tbl := rule.NewTable([]rule.Rule{{Domain: "x.com", Kind: rule.KindDynamic}})
+	s := New(tbl, res, &fakeProber{}, 10*time.Second, 5*time.Minute)
+	s.FailureWindow = 30 * time.Millisecond // 注入短窗口验证自动恢复
+
+	s.Pick(context.Background(), "x.com")
+	s.ReportFailure("x.com", ip("1.1.1.1"))
+	s.ReportFailure("x.com", ip("1.1.1.1"))
+	time.Sleep(50 * time.Millisecond) // 窗口滑出
 
 	ips, _ := s.Pick(context.Background(), "x.com")
 	if !ips[0].Equal(ip("1.1.1.1")) {
-		t.Fatalf("仅一次失败（成功已重置）不应沉底: %v", ips)
+		t.Fatalf("窗口滑出后应恢复原排序: %v", ips)
 	}
 }
 

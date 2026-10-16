@@ -12,8 +12,8 @@ import (
 type CandidateInfo struct {
 	IP      string `json:"ip"`
 	CostMS  int64  `json:"costMs"`  // 测速中位耗时
-	Failure int    `json:"failure"` // 连续失败次数
-	Sunk    bool   `json:"sunk"`    // 已沉底（连续失败 ≥ 阈值）
+	Failure int    `json:"failure"` // 窗口期内失败次数（默认窗口 10min）
+	Sunk    bool   `json:"sunk"`    // 已沉底（窗口内失败 ≥ 阈值）
 	Usable  bool   `json:"usable"`  // M5-13：false = 语义判死（已剔除出拨号列表），仅观测保留
 }
 
@@ -65,12 +65,14 @@ func (s *Selector) Inspect() []DomainInfo {
 			continue
 		}
 		cands := make([]CandidateInfo, len(st.candidates))
-		for j, c := range st.candidates {
+		now := time.Now()
+		for j := range st.candidates {
+			c := &st.candidates[j]
 			cands[j] = CandidateInfo{
 				IP:      c.ip.String(),
 				CostMS:  c.cost.Milliseconds(),
-				Failure: c.failure,
-				Sunk:    sinkRank(c) == 1,
+				Failure: c.recentFails(now, s.failureWindow()),
+				Sunk:    s.sunk(c, now),
 				Usable:  c.usable,
 			}
 		}

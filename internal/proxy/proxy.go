@@ -108,13 +108,14 @@ type Server struct {
 	ln    net.Listener
 }
 
-// fastDialCandidates/fastDialTimeout 分级拨号超时（M5-3）：前 N 个候选用
-// 快速档（与 DialTimeout 取小）——封锁期黑洞 IP 快速跳过，全程最坏耗时
-// 从 候选数×5s 量级压到秒级（断网实测曾 150s）。
+// raceDial 竞速拨号参数（RFC 8305 Happy Eyeballs 思路，取代 M5-3 的串行
+// 分级超时）：队首候选被黑洞时串行拨号按超时档逐个熬——2026-10-16 拨号
+// 日志实证 github.com 拨号中位 5s / 成功率 73%。错峰并发让健康候选无需
+// 等前序超时即可上场，最坏耗时从 Σ(候选×超时档) 压到 错峰×(宽度-1)+单候选拨号超时。
 const (
-	fastDialCandidates = 2
-	fastDialTimeout    = 2500 * time.Millisecond
-	maxDialAttempts    = 4
+	raceWidth    = 3                       // 参与竞速的候选数（兼快速失败上限）
+	raceStagger  = 300 * time.Millisecond  // 相邻候选启动错峰（跨境建连健康值 <500ms，足以分出快慢）
+	raceFastDial = 1500 * time.Millisecond // 竞速档单候选拨号超时（黑洞 SYN 1s 内必无响应；与 DialTimeout 取小）
 )
 
 // ---- M5-9b 降级记忆 ----
@@ -301,32 +302,9 @@ func (s *Server) handleConnect(ctx context.Context, cancel context.CancelFunc, c
 		// M5-9b 降级窗口内跳过候选拨号（波动期失败链 15-25s，客户端等不到
 		// 兜底上场）；Pick 照常调用以驱动候选重测——窗口到期自动恢复尝试
 		if !s.suppressed(domain) {
-			var d net.Dialer
-			for i, ip := range ips {
-				if i >= maxDialAttempts {
-					break // 快速失败：深封锁期候选全灭时逐个试完要 35s+，
-					// 不如尽快 502 让客户端自行重试（浏览器重试体验远好于挂等）
-				}
-				if ctx.Err() != nil {
-					break // 客户端已断开，停止尝试后续候选
-				}
-				d.Timeout = s.dialTimeout()
-				if i < fastDialCandidates {
-					if fast := min(s.dialTimeout(), fastDialTimeout); fast > 0 {
-						d.Timeout = fast
-					}
-				}
-				conn, derr := d.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
-				if derr == nil {
-					upstream, usedIP = conn, ip
-					dialDone = time.Now()
-					s.Dialer.ReportSuccess(domain, ip)
-					break
-				}
-				dialErr = derr
-				s.Dialer.ReportFailure(domain, ip)
-			}
+			upstream, usedIP, dialErr = s.raceDial(ctx, domain, ips, port)
 			if upstream != nil {
+				dialDone = time.Now()
 				s.strikeClear(domain)
 			} else {
 				s.strikeFail(domain)
@@ -459,6 +437,109 @@ func (s *Server) record(domain, via string, ip net.IP, dialDur time.Duration, up
 	}
 	s.Metrics.RecordConn(info)
 }
+
+// raceDial 错峰并发拨号：至多 raceWidth 个候选按 raceStagger 错峰启动，先完成
+// 握手者胜出（CAS 保证唯一胜者，并发双成功不泄漏连接）。落败拨号自行收尾：
+// 真实失败（超时/拒绝，且非客户端断开）原地上报 ReportFailure——黑洞反馈不因
+// 竞速丢失；迟到的成功直接关闭弃用，不报 success/failure（它没失败，只是慢，
+// 不该被沉底）。ips 为空或全灭返回 (nil, nil, lastErr)。
+func (s *Server) raceDial(ctx context.Context, domain string, ips []net.IP, port string) (net.Conn, net.IP, error) {
+	if len(ips) > raceWidth {
+		ips = ips[:raceWidth]
+	}
+	if len(ips) == 0 {
+		return nil, nil, nil
+	}
+
+	type result struct {
+		conn net.Conn
+		ip   net.IP
+	}
+	results := make(chan result, 1)
+	errs := make(chan error, raceWidth)
+	var wg sync.WaitGroup
+	var won atomic.Bool
+	timeout := s.dialTimeout()
+	if raceFastDial < timeout {
+		timeout = raceFastDial
+	}
+
+	for i, ip := range ips {
+		if ctx.Err() != nil {
+			break // 客户端已断开，不再启动新候选
+		}
+		if i > 0 {
+			t := time.NewTimer(raceStagger)
+			select {
+			case <-t.C:
+			case <-ctx.Done():
+				t.Stop()
+			}
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		wg.Add(1)
+		ip := ip
+		safego.Go("race-dial", s.Log, func() {
+			defer wg.Done()
+			startedAt := time.Now()
+			var d net.Dialer
+			d.Timeout = timeout
+			// racer 拨号与连接生命周期解耦（Background + 自带超时）：共享连接
+			// ctx 时，胜者的隧道一旦先结束（空闲 watchdog/客户端关闭触发
+			// cancel），落败者的拨号会以 context canceled 提前退出——真实超时
+			// 永远观测不到，黑洞反馈全部丢失（2026-10-16 测试实证）。
+			conn, err := d.DialContext(context.Background(), "tcp", net.JoinHostPort(ip.String(), port))
+			if err != nil {
+				errs <- err
+				s.Dialer.ReportFailure(domain, ip) // 自带超时判定的真实失败，必然上报
+				s.logger().Debug("竞速候选失败", "domain", domain, "ip", ip.String(),
+					"dialMs", time.Since(startedAt).Milliseconds(), "err", err.Error())
+				return
+			}
+			if !won.CompareAndSwap(false, true) {
+				_ = conn.Close() // 迟到的成功：弃用（不报——未失败，只是慢）
+				s.logger().Debug("竞速迟到成功弃用", "domain", domain, "ip", ip.String(),
+					"dialMs", time.Since(startedAt).Milliseconds())
+			} else {
+				results <- result{conn: conn, ip: ip}
+			}
+		})
+	}
+	allDone := make(chan struct{})
+	safego.Go("race-wait", s.Log, func() { wg.Wait(); close(allDone) })
+
+	// 收集：唯一胜者（CAS 保证）或全部退出。allDone 就绪时仍需非阻塞补查
+	// results——胜者 send 与其 wg.Done 的完成顺序无保证，select 双就绪时
+	// 随机分支可能错过 buffered 胜者。
+	for {
+		select {
+		case r := <-results:
+			s.Dialer.ReportSuccess(domain, r.ip)
+			return r.conn, r.ip, nil
+		case <-allDone:
+			select {
+			case r := <-results:
+				s.Dialer.ReportSuccess(domain, r.ip)
+				return r.conn, r.ip, nil
+			default:
+			}
+			var lastErr error = errAllRacersFailed
+			for len(errs) > 0 {
+				lastErr = <-errs
+			}
+			s.logger().Info("竞速全灭", "domain", domain, "candidates", len(ips), "err", lastErr)
+			return nil, nil, lastErr
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		}
+	}
+}
+
+// errAllRacersFailed 竞速全灭时的占位错误（具体失败原因已由各 racer 经
+// ReportFailure 上报 selector；连接日志的 dialErr 用它保底可读性）。
+var errAllRacersFailed = errors.New("all race candidates failed")
 
 func (s *Server) dialTimeout() time.Duration {
 	if s.DialTimeout > 0 {
