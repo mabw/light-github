@@ -79,6 +79,7 @@ type domainState struct {
 	lastBuildAt  time.Time // 最近一次重建时刻（冷却判定：深封锁期防每请求全量重测）
 	dirty        bool      // 需重建（失败上报/规则换表置位）；不清 probedAt——Inspect 在重建前仍可展示旧数据
 	forceRebuild bool      // Reprobe 显式强制重建：旁路冷却防抖（用户手动操作立即生效，M5-7 回归修复）
+	rebuilding   bool      // SWR：后台重建进行中（防重复触发；进行中 Pick 沿用旧候选）
 	generations  int       // 已重建次数：首个缓存用 firstTTL（短），第二个起用 steadyTTL（Watt 10s/100s 语义）
 	candidates   []candidate
 }
@@ -216,15 +217,16 @@ func (s *Selector) Pick(ctx context.Context, domain string) ([]net.IP, error) {
 	defer st.mu.Unlock()
 
 	if st.expired(time.Now(), s.firstTTL, s.steadyTTL) {
-		// 重建冷却（深封锁期防抖）：dirty 循环（拨号失败→dirty→重建→测速
-		// 全灭→再失败）会让每个请求都在锁内同步全量重测（8 IP × 3 TCP +
-		// 8 HEAD，秒级），并发请求全部阻塞——冷却期内沿用旧候选，由拨号侧
-		// 快速失败兜底，冷却过后再重测。forceRebuild（Reprobe 显式操作）
-		// 不受防抖约束
-		if st.dirty && !st.forceRebuild && !st.lastBuildAt.IsZero() && time.Since(st.lastBuildAt) < s.cooldown() {
-			// 沿用旧候选（可能全灭，拨号侧 4 候选快速 502 / M5-8 直连兜底）
-		} else {
-			cands, err := s.buildCandidates(ctx, domain, st)
+		switch {
+		case st.dirty && !st.forceRebuild && !st.lastBuildAt.IsZero() && time.Since(st.lastBuildAt) < s.cooldown():
+			// 重建冷却（深封锁期防抖）：dirty 循环（拨号失败→dirty→重建→测速
+			// 全灭→再失败）会让每个请求都在锁内同步全量重测（8 IP × 3 TCP +
+			// 8 HEAD，秒级），并发请求全部阻塞——冷却期内沿用旧候选，由拨号侧
+			// 快速失败兜底，冷却过后再重测。
+		case len(st.candidates) == 0 || st.forceRebuild:
+			// 冷启动 / Reprobe 显式请求：无旧可用候选（或用户要求立即新鲜），
+			// 同步重建——首 Pick 必须拿出候选，Reprobe 的返回值就是结果。
+			cands, err := s.buildCandidates(ctx, domain, st.candidates)
 			if err != nil && len(cands) == 0 {
 				return nil, err
 			}
@@ -232,6 +234,16 @@ func (s *Selector) Pick(ctx context.Context, domain string) ([]net.IP, error) {
 			st.forceRebuild = false
 			st.generations++
 			st.lastBuildAt = time.Now()
+		case st.rebuilding:
+			// 后台重建进行中：沿用旧候选（stale-while-revalidate 的读半边）
+		default:
+			// stale-while-revalidate（2026-10-17 线上实证：干扰窗口刚过，请求
+			// 路径上的同步重建（DoH+全候选探测）让直连 0.16s 的网络经代理首字节
+			// 4.8s）。有旧候选即先行返回去竞速——竞速本身就是探测器；重建转
+			// 后台，完成后原子换表。稳态 TTL 每周期原本由一个「倒霉请求」
+			// 代付的秒级测速，从此无人代付。
+			st.rebuilding = true
+			safego.Go("revalidate", s.Log, func() { s.revalidate(domain) })
 		}
 	}
 
@@ -343,14 +355,17 @@ func findCandidate(cands []candidate, ip net.IP) *candidate {
 	return nil
 }
 
-// buildCandidates 生成候选集并测速；resolver 失败但存在历史候选时沿用旧候选。
-func (s *Selector) buildCandidates(ctx context.Context, domain string, st *domainState) ([]candidate, error) {
+// buildCandidates 生成候选集并测速；resolver 失败但存在历史候选时沿用历史候选。
+// prev 为重建前的候选快照（失败记忆继承与降级沿用），调用方保证快照私有
+// （revalidate 的后台重建期间，racer 仍可能给旧候选追加失败戳——共享切片
+// 会构成数据竞争，快照必须深拷贝 failStamps）。
+func (s *Selector) buildCandidates(ctx context.Context, domain string, prev []candidate) ([]candidate, error) {
 	ips, resolveErr := s.candidateIPs(ctx, domain)
 
 	// resolve 失败：有旧候选则降级沿用（DoH 短暂抖动不应击穿缓存）
 	if resolveErr != nil {
-		if len(st.candidates) > 0 {
-			return st.candidates, nil
+		if len(prev) > 0 {
+			return prev, nil
 		}
 		return nil, resolveErr
 	}
@@ -381,11 +396,50 @@ func (s *Selector) buildCandidates(ctx context.Context, domain string, st *domai
 
 	// 沿用历史失败戳（测速刷新不应清零运行期失败记忆；过期由读取时窗口判定）
 	for i := range cands {
-		if old := findCandidate(st.candidates, cands[i].ip); old != nil {
+		if old := findCandidate(prev, cands[i].ip); old != nil {
 			cands[i].failStamps = old.failStamps
 		}
 	}
 	return cands, nil
+}
+
+// snapshotCandidates 深拷贝候选集（failStamps 独立底层数组）——后台重建
+// 在分片锁外读它，同时 ReportFailure 在锁内给原件追加失败戳。
+func snapshotCandidates(cands []candidate) []candidate {
+	out := make([]candidate, len(cands))
+	for i, c := range cands {
+		c.failStamps = append([]time.Time(nil), c.failStamps...)
+		out[i] = c
+	}
+	return out
+}
+
+// revalidate stale-while-revalidate 的写回半边：锁外执行秒级网络 IO（DoH+
+// 全候选探测），完成后原子换表。失败保留旧表（rebuilding 已复位，下次
+// 过期 Pick 会再试）；Reprobe 显式请求不因后台完成而被吞掉。
+func (s *Selector) revalidate(domain string) {
+	st := s.stateFor(domain)
+	st.mu.Lock()
+	prev := snapshotCandidates(st.candidates)
+	st.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cands, err := s.buildCandidates(ctx, domain, prev)
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.rebuilding = false
+	st.lastBuildAt = time.Now()
+	if err != nil || len(cands) == 0 {
+		s.logger().Warn("后台重建失败，沿用旧候选", "domain", domain, "err", err)
+		return
+	}
+	if !st.forceRebuild {
+		st.dirty = false
+	}
+	st.candidates, st.probedAt = cands, time.Now()
+	st.generations++
 }
 
 // candidateIPs 按规则策略产出原始候选（可能为空 + err）。

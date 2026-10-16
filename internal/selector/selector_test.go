@@ -15,14 +15,29 @@ import (
 type fakeResolver struct {
 	ips        []net.IP
 	err        error
-	calls      int
+	calls      atomic.Int64 // SWR 后台重建在 revalidate goroutine 中调用，需原子
 	lastDomain string
 }
 
 func (f *fakeResolver) Resolve(_ context.Context, domain string) ([]net.IP, error) {
-	f.calls++
+	f.calls.Add(1)
 	f.lastDomain = domain
 	return f.ips, f.err
+}
+
+// gatedResolver 仅阻塞第 2 次 Resolve（冷启动同步建表放行，SWR 后台重建
+// 扣住）——验证过期 Pick 不等待重建、重建单飞不重复触发。
+type gatedResolver struct {
+	ips   []net.IP
+	gate  chan struct{}
+	calls atomic.Int64
+}
+
+func (g *gatedResolver) Resolve(_ context.Context, _ string) ([]net.IP, error) {
+	if g.calls.Add(1) == 2 {
+		<-g.gate
+	}
+	return g.ips, nil
 }
 
 type fakeProber struct {
@@ -338,8 +353,20 @@ func TestSetTable_DoesNotBlockOtherDomainsOnInflightProbe(t *testing.T) {
 
 // ---- M5 Phase 2：失败即时反馈 + 选路生命周期回收 ----
 
-// 拨号失败上报应失效测速缓存（冷却过后的下次 Pick 重建重测，不等 TTL；
-// M5-7 起重建有冷却防抖，注入短冷却验证失效语义本身）
+// waitResolve 轮询等待后台重建完成（SWR 后重建异步，resolver 计数最终一致）。
+func waitResolve(t *testing.T, res *fakeResolver, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for res.calls.Load() < want && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if res.calls.Load() < want {
+		t.Fatalf("等待第 %d 次解析超时: %d", want, res.calls.Load())
+	}
+}
+
+// 拨号失败上报应失效测速缓存（冷却过后的下次 Pick 触发重建重测，不等 TTL；
+// SWR 后重建在后台执行，轮询到解析发生即证明失效语义）
 func TestReportFailure_InvalidatesCache(t *testing.T) {
 	res := &fakeResolver{ips: []net.IP{ip("1.1.1.1")}}
 	tbl := rule.NewTable([]rule.Rule{{Domain: "github.com", Kind: rule.KindDynamic}})
@@ -347,15 +374,13 @@ func TestReportFailure_InvalidatesCache(t *testing.T) {
 	s.RebuildCooldown = time.Millisecond
 
 	_, _ = s.Pick(context.Background(), "github.com")
-	if res.calls != 1 {
-		t.Fatalf("首次 Pick 应解析一次: %d", res.calls)
+	if res.calls.Load() != 1 {
+		t.Fatalf("首次 Pick 应解析一次: %d", res.calls.Load())
 	}
 	s.ReportFailure("github.com", ip("1.1.1.1"))
 	time.Sleep(2 * time.Millisecond) // 越过冷却窗口（防抖：冷却内沿用旧候选）
 	_, _ = s.Pick(context.Background(), "github.com")
-	if res.calls != 2 {
-		t.Fatalf("失败上报且冷却过后应重建候选（重新解析）: %d", res.calls)
-	}
+	waitResolve(t, res, 2)
 }
 
 // 首轮 TTL 短（10s 语义的注入版）：启动/预热时网络坏的自我纠正窗口
@@ -365,14 +390,13 @@ func TestPick_FirstRoundShorterTTL(t *testing.T) {
 	s := New(tbl, res, &fakeProber{}, 50*time.Millisecond, time.Hour)
 
 	_, _ = s.Pick(context.Background(), "github.com")
-	time.Sleep(60 * time.Millisecond) // 超过首轮 TTL
-	_, _ = s.Pick(context.Background(), "github.com")
-	if res.calls != 2 {
-		t.Fatalf("首轮 TTL 过期后应重建: %d", res.calls)
-	}
+	time.Sleep(60 * time.Millisecond)                 // 超过首轮 TTL
+	_, _ = s.Pick(context.Background(), "github.com") // SWR：旧候选先行，重建转后台
+	waitResolve(t, res, 2)
 	_, _ = s.Pick(context.Background(), "github.com") // 稳态 TTL 内
-	if res.calls != 2 {
-		t.Fatalf("进入稳态后不应频繁重建: %d", res.calls)
+	time.Sleep(20 * time.Millisecond)                 // 给潜在多余重建现形的时间
+	if res.calls.Load() != 2 {
+		t.Fatalf("进入稳态后不应频繁重建: %d", res.calls.Load())
 	}
 }
 
@@ -384,14 +408,61 @@ func TestPick_SteadyRoundTTL(t *testing.T) {
 
 	_, _ = s.Pick(context.Background(), "github.com") // 首个缓存（firstTTL 起算）
 	time.Sleep(40 * time.Millisecond)                 // > firstTTL(30ms)
-	_, _ = s.Pick(context.Background(), "github.com") // 重建 → 第二个缓存（steadyTTL 起算）
-	if res.calls != 2 {
-		t.Fatalf("首个缓存应按 firstTTL 过期重建: %d", res.calls)
-	}
+	_, _ = s.Pick(context.Background(), "github.com") // SWR 重建 → 第二个缓存（steadyTTL 起算）
+	waitResolve(t, res, 2)
 	time.Sleep(40 * time.Millisecond) // > firstTTL 但 < steadyTTL(2s)
 	_, _ = s.Pick(context.Background(), "github.com")
-	if res.calls != 2 {
-		t.Fatalf("稳态缓存应按 steadyTTL 存活（不受 firstTTL 影响）: %d", res.calls)
+	if res.calls.Load() != 2 {
+		t.Fatalf("稳态缓存应按 steadyTTL 存活（不受 firstTTL 影响）: %d", res.calls.Load())
+	}
+}
+
+// SWR（2026-10-17）：TTL 过期后的 Pick 必须立即返回旧候选（不等秒级重建——
+// 线上实证干扰窗口刚过时同步重建让首字节 4.8s）；重建后台单飞，进行中
+// 的 Pick 不重复触发；完成后新表生效且不再解析。
+func TestPick_StaleWhileRevalidate(t *testing.T) {
+	res := &gatedResolver{ips: []net.IP{ip("1.1.1.1")}, gate: make(chan struct{})}
+	tbl := rule.NewTable([]rule.Rule{{Domain: "x.com", Kind: rule.KindDynamic}})
+	s := New(tbl, res, &fakeProber{}, 20*time.Millisecond, time.Hour)
+
+	first, err := s.Pick(context.Background(), "x.com") // 冷启动：同步建表
+	if err != nil || len(first) != 1 || !first[0].Equal(ip("1.1.1.1")) {
+		t.Fatalf("冷启动应同步给出候选: %v %v", first, err)
+	}
+	time.Sleep(40 * time.Millisecond) // TTL 过期，后台重建被 gate 扣住
+
+	start := time.Now()
+	stale, err := s.Pick(context.Background(), "x.com")
+	if err != nil || len(stale) != 1 {
+		t.Fatalf("SWR 应立即返回旧候选: %v %v", stale, err)
+	}
+	if el := time.Since(start); el > 50*time.Millisecond {
+		t.Fatalf("过期 Pick 不应等待被阻塞的重建: %v", el)
+	}
+	// revalidate goroutine 的调度有微小延迟，轮询其已开跑（calls=2 且扣在 gate 上）
+	for i := 0; i < 200 && res.calls.Load() != 2; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if res.calls.Load() != 2 {
+		t.Fatalf("过期 Pick 应触发后台重建: %d", res.calls.Load())
+	}
+	_, _ = s.Pick(context.Background(), "x.com") // 重建进行中：单飞不重复触发
+	if res.calls.Load() != 2 {
+		t.Fatalf("重建进行中不应重复触发: %d", res.calls.Load())
+	}
+
+	close(res.gate) // 放行重建
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) { // 轮询 Inspect 的 probedAt 前移确认换表
+		infos := s.Inspect()
+		if len(infos) > 0 && infos[0].ProbedAt.After(start) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond) // 完成后稳态 TTL 内不再解析
+	if _, _ = s.Pick(context.Background(), "x.com"); res.calls.Load() != 2 {
+		t.Fatalf("换表完成后稳态内不应再解析: %d", res.calls.Load())
 	}
 }
 
@@ -505,14 +576,12 @@ func TestPick_DirtyRebuildCooldown(t *testing.T) {
 	s.ReportFailure("github.com", ip("1.1.1.1"))      // dirty
 	_, _ = s.Pick(context.Background(), "github.com")
 	_, _ = s.Pick(context.Background(), "github.com")
-	if res.calls != 1 { // 冷却挡住首建后立即的 dirty，不重建
-		t.Fatalf("冷却期内不应重复重建: %d", res.calls)
+	if res.calls.Load() != 1 { // 冷却挡住首建后立即的 dirty，不重建
+		t.Fatalf("冷却期内不应重复重建: %d", res.calls.Load())
 	}
 	time.Sleep(550 * time.Millisecond)
-	_, _ = s.Pick(context.Background(), "github.com")
-	if res.calls != 2 {
-		t.Fatalf("冷却过后应重建: %d", res.calls)
-	}
+	_, _ = s.Pick(context.Background(), "github.com") // SWR：冷却过后重建转后台
+	waitResolve(t, res, 2)
 }
 
 // M5-12：借段只对根域开放——子域服务（api.github.com 有专属服务 IP）借
